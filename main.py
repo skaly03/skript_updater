@@ -178,6 +178,8 @@ async def meas(topic_dict, value_dict):
             adc_gs_value = adc_gs.read_u16() * adcVDD / adcMax
             adc_Ib_value = adc_Ib.read_u16() * adcVDD / adcMax
             Ib_current = (adc_Ib_value / multi_Ib) / 7.8
+            if Ib_current > 0.1:
+                return f'ERROR: current to high'
             multi_lst_ds.append(adc_ds_value)
             multi_lst_gs.append(adc_gs_value)
             multi_lst_Ib.append(adc_Ib_value)
@@ -187,6 +189,7 @@ async def meas(topic_dict, value_dict):
         return_dict = {'U_DS': av_ds, 'U_GS': av_gs, 'Ib': av_Ib}
     
     elif topic_dict['meas_type'] == 'Drain-Source-Sweep':
+        break_bool = False
         adc_ds_list = []
         adc_gs_list = []
         adc_Ib_list = []
@@ -201,14 +204,17 @@ async def meas(topic_dict, value_dict):
             adc_gs_value = adc_gs.read_u16() * adcVDD / adcMax
             adc_Ib_value = adc_Ib.read_u16() * adcVDD / adcMax
             Ib_current = (adc_Ib_value / multi_Ib) / 7.8
+            if Ib_current > 0.1:
+                brake_bool = True
+                break
             # Now we want to add those variables to the created list variables above
             adc_ds_list.append(adc_ds_value)
             adc_gs_list.append(adc_gs_value)
             adc_Ib_list.append(Ib_current)
-        return_dict = {'U_DS': adc_ds_list, 'U_GS': adc_gs_list, 'Ib': adc_Ib_list}
+        return_dict = {'U_DS': adc_ds_list, 'U_GS': adc_gs_list, 'Ib': adc_Ib_list, 'break_bool': break_bool}
 
     elif topic_dict['meas_type'] == 'Gate-Source-Sweep':
-        return_dict = {}
+        break_bool = False
         adc_ds_list = []
         adc_gs_list = []
         adc_Ib_list = []
@@ -222,14 +228,17 @@ async def meas(topic_dict, value_dict):
             adc_gs_value = adc_gs.read_u16() * adcVDD / adcMax
             adc_Ib_value = adc_Ib.read_u16() * adcVDD / adcMax
             Ib_current = (adc_Ib_value / multi_Ib) / 7.8
+            if Ib_current > 0.1:
+                break_bool = True
+                break
             # Now we want to add those variables to the created list variables above
             adc_ds_list.append(adc_ds_value)
             adc_gs_list.append(adc_gs_value)
             adc_Ib_list.append(Ib_current)
-        return_dict = {'U_DS': adc_ds_list, 'U_GS': adc_gs_list, 'Ib': adc_Ib_list}
+        return_dict = {'U_DS': adc_ds_list, 'U_GS': adc_gs_list, 'Ib': adc_Ib_list, 'break_bool': break_bool}
     
     elif topic_dict['meas_type'] == 'CombinedSweep':
-        return_dict = {}
+        break_bool = False
         adc_ds_list = []
         adc_gs_list = []
         adc_Ib_list = []
@@ -245,17 +254,20 @@ async def meas(topic_dict, value_dict):
                 adc_gs_value = adc_gs.read_u16() * adcVDD / adcMax
                 adc_Ib_value = adc_Ib.read_u16() * adcVDD / adcMax
                 Ib_current = (adc_Ib_value / multi_Ib) / 7.8
+                if Ib_current > 0.1:
+                    break_bool = True
+                    break
                 # Now we want to add those variables to the created list variables above
                 adc_ds_list.append(adc_ds_value)
                 adc_gs_list.append(adc_gs_value)
                 adc_Ib_list.append(Ib_current)
             # we need to save those measured values before the loop starts again
-            return_dict = {'U_DS': adc_ds_list, 'U_GS': adc_gs_list, 'Ib': adc_Ib_list}
+            return_dict = {'U_DS': adc_ds_list, 'U_GS': adc_gs_list, 'Ib': adc_Ib_list, 'break_bool': break_bool}
             # update and reset those values to ensure measurement-sweep
             gs_calculated_value = gs_calculated_value + value_dict['U_GS'][2]
             ds_calculated_value = value_dict['U_DS'][0]
     else:
-        return
+        return 'unknown measurement type'
     # sustain output low if the measurement is done
     dac_gs.write(0)
     dac_ds.write(0)
