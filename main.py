@@ -205,7 +205,7 @@ async def meas(topic_dict, value_dict):
             adc_Ib_value = adc_Ib.read_u16() * adcVDD / adcMax
             Ib_current = (adc_Ib_value / multi_Ib) / 7.8
             if Ib_current > 0.1:
-                brake_bool = True
+                break_bool = True
                 break
             # Now we want to add those variables to the created list variables above
             adc_ds_list.append(adc_ds_value)
