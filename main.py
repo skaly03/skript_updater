@@ -263,7 +263,7 @@ async def meas(topic_dict, value_dict):
                 adc_gs_list.append(adc_gs_value)
                 adc_Ib_list.append(Ib_current)
             # we need to save those measured values before the loop starts again
-            return_dict[f'U_GS: {gs_calculated_value:.2f}] = {'U_DS': adc_ds_list, 'U_GS': adc_gs_list, 'Ib': adc_Ib_list, 'break_bool': break_bool}
+            return_dict[f'U_GS: {gs_calculated_value:.2f}'] = {'U_DS': adc_ds_list, 'U_GS': adc_gs_list, 'Ib': adc_Ib_list, 'break_bool': break_bool}
             # update and reset those values to ensure measurement-sweep
             gs_calculated_value = gs_calculated_value + value_dict['U_GS'][2]
             ds_calculated_value = value_dict['U_DS'][0]
