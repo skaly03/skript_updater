@@ -1,6 +1,3 @@
-# Author: skaly03
-# file created at 28. Aug 2025
-
 from machine import Pin, I2C, ADC
 from mcp4725 import MCP4725
 import _thread
@@ -109,9 +106,11 @@ time.sleep(5) # to make sure to be disconnected from broker
 
 async def init_hw():
     global glob
-    i2c = I2C(id=1, scl=Pin(15), sda=Pin(14), freq=400000)
+    i2c = I2C(id=0, scl=Pin(17), sda=Pin(16), freq=400000)
     glob['dac_ds'] = MCP4725(i2c=i2c, address=98)
     glob['dac_gs'] = MCP4725(i2c=i2c, address=99)
+    glob['dac_ds'].write(0)
+    glob['dac_gs'].write(0)
     glob['led'] = Pin('LED', Pin.OUT)
     glob['btn_1'] = Pin(0, Pin.IN, Pin.PULL_UP)
     glob['btn_2'] = Pin(1, Pin.IN, Pin.PULL_UP)
@@ -134,8 +133,8 @@ async def meas(topic_dict, value_dict):
     # topic_list needs: topic_prefix/board_id/username/messung
     # additional arguments are needed:
 
-    # for meas_type 1: single values for u_gs and u_ds
-    # example: {'U_DS': 2.0, 'U_GS': 2.2}
+    # for meas_type 1: single values for u_gs and u_ds; optional: Multi-factor
+    # example: {'U_DS': 2.0, 'U_GS': 2.2, 'multi': 100}
 
     # for meas_type 2: single value for u_gs, list of u_ds[start, stop, step]
     # example: {'U_DS': [0, 3.0, 0.25], 'U_GS': 2.0}
@@ -146,24 +145,46 @@ async def meas(topic_dict, value_dict):
     # for meas_type 4: list of [start, step, stop] for both u_gs and u_ds is needed
     # example: {'U_DS': [0, 3.3, 0.1], 'U_GS': [1, 3, 0.5]}
 
+    #    for element in ADC_Ib:
+    #    multi = 110/47
+    #    voltage = element / multi
+    #    current = voltage / 8
+    #    Ib.append(current)
+
     dac_ds = glob['dac_ds']
     dac_gs = glob['dac_gs']
     
     adc_ds = ADC(Pin(26))
     adc_gs = ADC(Pin(27))
     adc_Ib = ADC(Pin(28))
+    multi_Ib = 9800/4600
     adcMax = 2**16 # 16 Bit
     adcVDD = 3.3   # Volt
     U_1 = 4095/adcVDD # reference-value for dac's: is used to iterate over 4095 states for Voltages fom 0 to 3.3 V
 
     if topic_dict['meas_type'] == 'SingleMeasurement':
-        dac_gs.write(int(value_dict['U_GS'] * U_1))
-        dac_ds.write(int(value_dict['U_DS'] * U_1))
-        time.sleep(0.1) # do not use asyncio on purpose here to sustain that measurement
-        adc_ds_value = adc_ds.read_u16() * adcVDD / adcMax
-        adc_gs_value = adc_gs.read_u16() * adcVDD / adcMax
-        adc_Ib_value = adc_Ib.read_u16() * adcVDD / adcMax
-        return_dict = {'U_DS': adc_ds_value, 'U_GS': adc_gs_value, 'Ib': adc_Ib_value}
+        if value_dict['multi']:
+            multi = value_dict['multi']
+        else:
+            multi = 1 # default value
+        multi_lst_ds = []
+        multi_lst_gs = []
+        multi_lst_Ib = []
+        for _ in range(multi):
+            dac_gs.write(int(value_dict['U_GS'] * U_1))
+            dac_ds.write(int(value_dict['U_DS'] * U_1))
+            time.sleep(0.1) # do not use asyncio on purpose here to sustain that measurement
+            adc_ds_value = adc_ds.read_u16() * adcVDD / adcMax
+            adc_gs_value = adc_gs.read_u16() * adcVDD / adcMax
+            adc_Ib_value = adc_Ib.read_u16() * adcVDD / adcMax
+            Ib_current = (adc_Ib_value / multi_Ib) / 7.8
+            multi_lst_ds.append(adc_ds_value)
+            multi_lst_gs.append(adc_gs_value)
+            multi_lst_Ib.append(adc_Ib_value)
+        av_ds = sum(multi_lst_ds) / len(multi_lst_ds)
+        av_gs = sum(multi_lst_gs) / len(multi_lst_gs)
+        av_Ib = sum(multi_lst_Ib) / len(multi_lst_Ib)
+        return_dict = {'U_DS': av_ds, 'U_GS': av_gs, 'Ib': av_Ib}
     
     elif topic_dict['meas_type'] == 'Drain-Source-Sweep':
         adc_ds_list = []
@@ -172,17 +193,19 @@ async def meas(topic_dict, value_dict):
         ds_calculated_value = value_dict['U_DS'][0]
         dac_gs.write(int(value_dict['U_GS'] * U_1))
         while ds_calculated_value < value_dict['U_DS'][1]:
-            dac_ds.write(int(ds_calculated_value) * U_1)
+            dac_gs.write(int(value_dict['U_GS'] * U_1))
+            dac_ds.write(int(ds_calculated_value * U_1))
             ds_calculated_value = ds_calculated_value + value_dict['U_DS'][2] # At this point, the step variable of the given list is added to the variable
             time.sleep(0.1) # Wait a little...
             adc_ds_value = adc_ds.read_u16() * adcVDD / adcMax
             adc_gs_value = adc_gs.read_u16() * adcVDD / adcMax
             adc_Ib_value = adc_Ib.read_u16() * adcVDD / adcMax
+            Ib_current = (adc_Ib_value / multi_Ib) / 7.8
             # Now we want to add those variables to the created list variables above
             adc_ds_list.append(adc_ds_value)
             adc_gs_list.append(adc_gs_value)
-            adc_Ib_list.append(adc_Ib_value)
-        return_dict[gs_calculated_value] = {'U_DS': adc_ds_list, 'U_GS': adc_ds_list, 'Ib': adc_Ib_list}
+            adc_Ib_list.append(Ib_current)
+        return_dict = {'U_DS': adc_ds_list, 'U_GS': adc_gs_list, 'Ib': adc_Ib_list}
 
     elif topic_dict['meas_type'] == 'Gate-Source-Sweep':
         return_dict = {}
@@ -192,17 +215,18 @@ async def meas(topic_dict, value_dict):
         gs_calculated_value = value_dict['U_GS'][0]
         dac_ds.write(int(value_dict['U_DS'] * U_1))
         while gs_calculated_value < value_dict['U_GS'][1]:
-            dac_gs.write(int(gs_calculated_value) * U_1)
+            dac_gs.write(int(gs_calculated_value * U_1))
             gs_calculated_value = gs_calculated_value + value_dict['U_GS'][2] # At this point, the step variable of the given list is added to the variable
             time.sleep(0.1) # Wait a little...
             adc_ds_value = adc_ds.read_u16() * adcVDD / adcMax
             adc_gs_value = adc_gs.read_u16() * adcVDD / adcMax
             adc_Ib_value = adc_Ib.read_u16() * adcVDD / adcMax
+            Ib_current = (adc_Ib_value / multi_Ib) / 7.8
             # Now we want to add those variables to the created list variables above
             adc_ds_list.append(adc_ds_value)
             adc_gs_list.append(adc_gs_value)
-            adc_Ib_list.append(adc_Ib_value)
-        return_dict[ds_calculated_value] = {'U_DS': adc_ds_list, 'U_GS': adc_ds_list, 'Ib': adc_Ib_list}
+            adc_Ib_list.append(Ib_current)
+        return_dict = {'U_DS': adc_ds_list, 'U_GS': adc_gs_list, 'Ib': adc_Ib_list}
     
     elif topic_dict['meas_type'] == 'CombinedSweep':
         return_dict = {}
@@ -212,24 +236,26 @@ async def meas(topic_dict, value_dict):
         ds_calculated_value = value_dict['U_DS'][0]
         gs_calculated_value = value_dict['U_GS'][0]
         while gs_calculated_value < value_dict['U_GS'][1]:
-            dac_gs.write(int(gs_calculated_value) * U_1)
+            dac_gs.write(int(gs_calculated_value * U_1))
             while ds_calculated_value < value_dict['U_DS'][1]:
-                dac_ds.write(int(ds_calculated_value) * U_1)
+                dac_ds.write(int(ds_calculated_value * U_1))
                 ds_calculated_value = ds_calculated_value + value_dict['U_DS'][2] # At this point, the step variable of the given list is added to the variable
                 time.sleep(0.1) # Wait a little...
                 adc_ds_value = adc_ds.read_u16() * adcVDD / adcMax
                 adc_gs_value = adc_gs.read_u16() * adcVDD / adcMax
                 adc_Ib_value = adc_Ib.read_u16() * adcVDD / adcMax
+                Ib_current = (adc_Ib_value / multi_Ib) / 7.8
                 # Now we want to add those variables to the created list variables above
                 adc_ds_list.append(adc_ds_value)
                 adc_gs_list.append(adc_gs_value)
-                adc_Ib_list.append(adc_Ib_value)
+                adc_Ib_list.append(Ib_current)
             # we need to save those measured values before the loop starts again
-            return_dict[gs_calculated_value] = {'U_DS': adc_ds_list, 'U_GS': adc_ds_list, 'Ib': adc_Ib_list}
+            return_dict = {'U_DS': adc_ds_list, 'U_GS': adc_gs_list, 'Ib': adc_Ib_list}
             # update and reset those values to ensure measurement-sweep
             gs_calculated_value = gs_calculated_value + value_dict['U_GS'][2]
             ds_calculated_value = value_dict['U_DS'][0]
-        
+    else:
+        return
     # sustain output low if the measurement is done
     dac_gs.write(0)
     dac_ds.write(0)
