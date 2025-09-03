@@ -179,14 +179,14 @@ async def meas(topic_dict, value_dict):
             adc_Ib_value = adc_Ib.read_u16() * adcVDD / adcMax
             Ib_current = (adc_Ib_value / multi_Ib) / 7.8
             if Ib_current > 0.1:
-                return f'ERROR: current to high'
+                break_bool = True
             multi_lst_ds.append(adc_ds_value)
             multi_lst_gs.append(adc_gs_value)
             multi_lst_Ib.append(adc_Ib_value)
         av_ds = sum(multi_lst_ds) / len(multi_lst_ds)
         av_gs = sum(multi_lst_gs) / len(multi_lst_gs)
         av_Ib = sum(multi_lst_Ib) / len(multi_lst_Ib)
-        return_dict = {'U_DS': av_ds, 'U_GS': av_gs, 'Ib': av_Ib}
+        return_dict = {'U_DS': av_ds, 'U_GS': av_gs, 'Ib': av_Ib, 'break_bool': break_bool}
     
     elif topic_dict['meas_type'] == 'Drain-Source-Sweep':
         break_bool = False
@@ -239,6 +239,7 @@ async def meas(topic_dict, value_dict):
     
     elif topic_dict['meas_type'] == 'CombinedSweep':
         break_bool = False
+        return_dict = {}
         adc_ds_list = []
         adc_gs_list = []
         adc_Ib_list = []
@@ -262,7 +263,7 @@ async def meas(topic_dict, value_dict):
                 adc_gs_list.append(adc_gs_value)
                 adc_Ib_list.append(Ib_current)
             # we need to save those measured values before the loop starts again
-            return_dict = {'U_DS': adc_ds_list, 'U_GS': adc_gs_list, 'Ib': adc_Ib_list, 'break_bool': break_bool}
+            return_dict[f'U_GS: {gs_calculated_value:.2f}] = {'U_DS': adc_ds_list, 'U_GS': adc_gs_list, 'Ib': adc_Ib_list, 'break_bool': break_bool}
             # update and reset those values to ensure measurement-sweep
             gs_calculated_value = gs_calculated_value + value_dict['U_GS'][2]
             ds_calculated_value = value_dict['U_DS'][0]
