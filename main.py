@@ -60,7 +60,20 @@ async def register_conn_callback(client):
     SUB_TOPIC_REGISTER = glob['topic_prefix'] + f'/register_done/{glob['mac_addr']}'
     await client.subscribe(SUB_TOPIC_REGISTER, 1)
 
-async def register_loop():
+async def register_message(register_client):
+    global glob
+    while not glob['board_id']:
+        await register_client.publish(glob['topic_prefix'] + '/register/' + glob['mac_addr'], glob['mac_addr'].encode('utf-8'))
+        await asyncio.sleep(10)
+
+async def register_loop(register_client):
+    while True:
+        await asyncio.sleep(0.5)
+        if glob['board_id'] != False:
+            await register_client.disconnect()
+            break
+
+async def register_config():
     global glob
     register_config = glob['register_config']
 
@@ -92,15 +105,9 @@ async def register_loop():
     await register_client.connect()
 
     print('client ready for registration')
+    await asyncio.gather(register_loop(register_client), register_message(register_client))
 
-    await register_client.publish(glob['topic_prefix'] + '/register/' + glob['mac_addr'], glob['mac_addr'].encode('utf-8'))
-    while True:
-        await asyncio.sleep(0.5)
-        if glob['board_id'] != False:
-            await register_client.disconnect()
-            break
-
-asyncio.get_event_loop().run_until_complete(register_loop())
+asyncio.get_event_loop().run_until_complete(register_config())
 
 # start of mainly used loop for mqtt communication and measurement
 time.sleep(5) # to make sure to be disconnected from broker
