@@ -1,5 +1,6 @@
 from machine import Pin, I2C, ADC
 from mcp4725 import MCP4725
+from hw_emu import dac
 import _thread
 import mqtt_async
 import asyncio
@@ -73,8 +74,8 @@ async def register_loop():
 
     mywlan.connect()
 
-    register_config['server'] = '172.20.10.3'
-    register_config['port'] = 8001
+    register_config['server'] = 'broker.hivemq.com'
+    register_config['port'] = 1883
     register_config['client_id'] = mac_addr + '-r'
     register_config['ssid'] = 'iPhone von Tobi'
     register_config['wifi_pw'] = 'WlanPasswort3344!'
@@ -107,10 +108,15 @@ time.sleep(5) # to make sure to be disconnected from broker
 async def init_hw():
     global glob
     i2c = I2C(id=0, scl=Pin(17), sda=Pin(16), freq=400000)
-    glob['dac_ds'] = MCP4725(i2c=i2c, address=98)
-    glob['dac_gs'] = MCP4725(i2c=i2c, address=99)
-    glob['dac_ds'].write(0)
-    glob['dac_gs'].write(0)
+    try:
+        glob['dac_ds'] = MCP4725(i2c=i2c, address=98)
+        glob['dac_gs'] = MCP4725(i2c=i2c, address=99)
+        glob['dac_ds'].write(0)
+        glob['dac_gs'].write(0)
+    except Exception as e:
+        print('no hardware found, change into emulation mode')
+        glob['dac_ds'] = None
+        glob['dac_gs'] = None
     glob['led'] = Pin('LED', Pin.OUT)
     glob['btn_1'] = Pin(0, Pin.IN, Pin.PULL_UP)
     glob['btn_2'] = Pin(1, Pin.IN, Pin.PULL_UP)
@@ -142,7 +148,7 @@ async def meas(topic_dict, value_dict):
     # for meas_type 3: single value for u_ds, list of u_gs[start, stop, step]
     # example: {'U_DS': 2.0, 'U_GS': [1.0, 2.0, 0.1]}
 
-    # for meas_type 4: list of [start, stop, step] for both u_gs and u_ds is needed
+    # for meas_type 4: list of [start, step, stop] for both u_gs and u_ds is needed
     # example: {'U_DS': [0, 3.3, 0.1], 'U_GS': [1, 3, 0.5]}
 
     #    for element in ADC_Ib:
@@ -162,11 +168,12 @@ async def meas(topic_dict, value_dict):
     adcVDD = 3.3   # Volt
     U_1 = 4095/adcVDD # reference-value for dac's: is used to iterate over 4095 states for Voltages fom 0 to 3.3 V
 
-    if topic_dict['meas_type'] == 'SingleMeasurement':
-        if value_dict['multi']:
+    if topic_dict['meas_type'] == 'Single-Measurement':
+        if value_dict.get('multi') != None:
             multi = value_dict['multi']
         else:
             multi = 1 # default value
+        break_bool = False
         multi_lst_ds = []
         multi_lst_gs = []
         multi_lst_Ib = []
@@ -182,11 +189,11 @@ async def meas(topic_dict, value_dict):
                 break_bool = True
             multi_lst_ds.append(adc_ds_value)
             multi_lst_gs.append(adc_gs_value)
-            multi_lst_Ib.append(adc_Ib_value)
+            multi_lst_Ib.append(Ib_current)
         av_ds = sum(multi_lst_ds) / len(multi_lst_ds)
         av_gs = sum(multi_lst_gs) / len(multi_lst_gs)
         av_Ib = sum(multi_lst_Ib) / len(multi_lst_Ib)
-        return_dict = {'U_DS': av_ds, 'U_GS': av_gs, 'Ib': av_Ib, 'break_bool': break_bool}
+        return_dict = {'U_DS': av_ds, 'U_GS': av_gs, 'I_D': av_Ib, 'break_bool': break_bool}
     
     elif topic_dict['meas_type'] == 'Drain-Source-Sweep':
         break_bool = False
@@ -211,7 +218,7 @@ async def meas(topic_dict, value_dict):
             adc_ds_list.append(adc_ds_value)
             adc_gs_list.append(adc_gs_value)
             adc_Ib_list.append(Ib_current)
-        return_dict = {'U_DS': adc_ds_list, 'U_GS': adc_gs_list, 'Ib': adc_Ib_list, 'break_bool': break_bool}
+        return_dict = {'U_DS': adc_ds_list, 'U_GS': adc_gs_list, 'I_D': adc_Ib_list, 'break_bool': break_bool}
 
     elif topic_dict['meas_type'] == 'Gate-Source-Sweep':
         break_bool = False
@@ -235,17 +242,21 @@ async def meas(topic_dict, value_dict):
             adc_ds_list.append(adc_ds_value)
             adc_gs_list.append(adc_gs_value)
             adc_Ib_list.append(Ib_current)
-        return_dict = {'U_DS': adc_ds_list, 'U_GS': adc_gs_list, 'Ib': adc_Ib_list, 'break_bool': break_bool}
+        return_dict = {'U_DS': adc_ds_list, 'U_GS': adc_gs_list, 'I_D': adc_Ib_list, 'break_bool': break_bool}
     
-    elif topic_dict['meas_type'] == 'CombinedSweep':
+    elif topic_dict['meas_type'] == 'Combined-Sweep':
         break_bool = False
         return_dict = {}
-        adc_ds_list = []
-        adc_gs_list = []
-        adc_Ib_list = []
+        main_ds_list = []
+        main_gs_list = []
+        main_Ib_list = []
         ds_calculated_value = value_dict['U_DS'][0]
         gs_calculated_value = value_dict['U_GS'][0]
         while gs_calculated_value < value_dict['U_GS'][1]:
+            # we need to make sure that all our used list in those loops are ready for new data
+            adc_ds_list = []
+            adc_gs_list = []
+            adc_Ib_list = []
             dac_gs.write(int(gs_calculated_value * U_1))
             while ds_calculated_value < value_dict['U_DS'][1]:
                 dac_ds.write(int(ds_calculated_value * U_1))
@@ -263,10 +274,13 @@ async def meas(topic_dict, value_dict):
                 adc_gs_list.append(adc_gs_value)
                 adc_Ib_list.append(Ib_current)
             # we need to save those measured values before the loop starts again
-            return_dict[f'U_GS: {gs_calculated_value:.2f}'] = {'U_DS': adc_ds_list, 'U_GS': adc_gs_list, 'Ib': adc_Ib_list, 'break_bool': break_bool}
+            main_ds_list.append(adc_ds_list)
+            main_gs_list.append(adc_gs_list)
+            main_Ib_list.append(adc_Ib_list)
             # update and reset those values to ensure measurement-sweep
             gs_calculated_value = gs_calculated_value + value_dict['U_GS'][2]
             ds_calculated_value = value_dict['U_DS'][0]
+        return_dict = {'U_DS': main_ds_list, 'U_GS': main_gs_list, 'I_D': main_Ib_list, 'break_bool': break_bool}
     else:
         return 'unknown measurement type'
     # sustain output low if the measurement is done
@@ -302,9 +316,15 @@ async def main_callback(topic, msg, retained, qos, dup):
             'username': topic_list[2],
             'meas_type': topic_list[3]
         }
-        result = await meas(topic_dict, msg)
-        result = json.dumps(result)
-        await client.publish(glob['topic_prefix'] + f'/Paket/{topic_list[2]}/{glob["board_id"]}/{topic_list[3]}', result.encode('utf-8'))
+        if glob['dac_gs'] and glob['dac_ds']:
+            result = await meas(topic_dict, msg)
+        else:
+            result = dac(topic_dict, msg)
+        if result == 'unknown measurement type':
+            await client.publish(glob['topic_prefix'] + f'/Paket/{topic_list[2]}/{glob["board_id"]}/{topic_list[3]}', result.encode('utf-8'))
+        else:
+            result = json.dumps(result)
+            await client.publish(glob['topic_prefix'] + f'/Paket/{topic_list[2]}/{glob["board_id"]}/{topic_list[3]}', result.encode('utf-8'))
         await client.publish(glob['topic_prefix'] + f'/Zustand_Messplatz/{glob["board_id"]}', 'ready'.encode('utf-8'))
     
     elif topic == glob['topic_prefix'] + '/Status':
@@ -334,8 +354,8 @@ async def main():
     main_config = glob['main_config']
     # for now: if last-will is defined: rpi pico will lose its connection to the broker: dead socket - needs to be fixed for the purpose below
     # mqtt_async.config['will'] = mqtt_async.MQTTMessage(f'{glob["topic_prefix"]}/Zustand_Messplatz/{glob["board_id"]}', 'offline')
-    main_config['server'] = '172.20.10.3'
-    main_config['port'] = 8001
+    main_config['server'] = 'broker.hivemq.com'
+    main_config['port'] = 1883
     main_config['client_id'] = glob['mac_addr']
     main_config['ssid'] = 'iPhone von Tobi'
     main_config['wifi_pw'] = 'WlanPasswort3344!'
