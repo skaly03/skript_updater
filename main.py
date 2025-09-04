@@ -142,7 +142,7 @@ async def meas(topic_dict, value_dict):
     # for meas_type 3: single value for u_ds, list of u_gs[start, stop, step]
     # example: {'U_DS': 2.0, 'U_GS': [1.0, 2.0, 0.1]}
 
-    # for meas_type 4: list of [start, step, stop] for both u_gs and u_ds is needed
+    # for meas_type 4: list of [start, stop, step] for both u_gs and u_ds is needed
     # example: {'U_DS': [0, 3.3, 0.1], 'U_GS': [1, 3, 0.5]}
 
     #    for element in ADC_Ib:
