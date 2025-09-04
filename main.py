@@ -134,7 +134,7 @@ async def blink(led, board_id, btn_3):
                 await asyncio.sleep(0.2)     
         await asyncio.sleep(5)
 
-async def meas(topic_dict, value_dict):
+async def meas(topic_dict, value_dict, client):
     global glob
     # topic_list needs: topic_prefix/board_id/username/messung
     # additional arguments are needed:
@@ -159,6 +159,10 @@ async def meas(topic_dict, value_dict):
 
     dac_ds = glob['dac_ds']
     dac_gs = glob['dac_gs']
+
+    username = topic_dict['username']
+    meas_type = topic_dict['meas_type']
+    board_id = glob['board_id']
     
     adc_ds = ADC(Pin(26))
     adc_gs = ADC(Pin(27))
@@ -168,7 +172,7 @@ async def meas(topic_dict, value_dict):
     adcVDD = 3.3   # Volt
     U_1 = 4095/adcVDD # reference-value for dac's: is used to iterate over 4095 states for Voltages fom 0 to 3.3 V
 
-    if topic_dict['meas_type'] == 'Single-Measurement':
+    if meas_type == 'Single-Measurement':
         if value_dict.get('multi') != None:
             multi = value_dict['multi']
         else:
@@ -195,7 +199,7 @@ async def meas(topic_dict, value_dict):
         av_Ib = sum(multi_lst_Ib) / len(multi_lst_Ib)
         return_dict = {'U_DS': av_ds, 'U_GS': av_gs, 'I_D': av_Ib, 'break_bool': break_bool}
     
-    elif topic_dict['meas_type'] == 'Drain-Source-Sweep':
+    elif meas_type == 'Drain-Source-Sweep':
         break_bool = False
         adc_ds_list = []
         adc_gs_list = []
@@ -214,6 +218,8 @@ async def meas(topic_dict, value_dict):
             if Ib_current > 0.1:
                 break_bool = True
                 break
+            # Publish for every loop iteration
+            await client.publish(glob['topic_prefix'] + f"/Einzeln/{username}/{board_id}/{meas_type}", {'U_DS': adc_ds_value, 'U_GS': adc_gs_value, 'I_D': Ib_current})
             # Now we want to add those variables to the created list variables above
             adc_ds_list.append(adc_ds_value)
             adc_gs_list.append(adc_gs_value)
@@ -238,6 +244,8 @@ async def meas(topic_dict, value_dict):
             if Ib_current > 0.1:
                 break_bool = True
                 break
+            # Publish for every loop iteration
+            await client.publish(glob['topic_prefix'] + f"/Einzeln/{username}/{board_id}/{meas_type}", {'U_DS': adc_ds_value, 'U_GS': adc_gs_value, 'I_D': Ib_current})
             # Now we want to add those variables to the created list variables above
             adc_ds_list.append(adc_ds_value)
             adc_gs_list.append(adc_gs_value)
@@ -269,6 +277,8 @@ async def meas(topic_dict, value_dict):
                 if Ib_current > 0.1:
                     break_bool = True
                     break
+                # Publish for every loop iteration
+                await client.publish(glob['topic_prefix'] + f"/Einzeln/{username}/{board_id}/{meas_type}", {'U_DS': adc_ds_value, 'U_GS': adc_gs_value, 'I_D': Ib_current})
                 # Now we want to add those variables to the created list variables above
                 adc_ds_list.append(adc_ds_value)
                 adc_gs_list.append(adc_gs_value)
@@ -317,7 +327,7 @@ async def main_callback(topic, msg, retained, qos, dup):
             'meas_type': topic_list[3]
         }
         if glob['dac_gs'] and glob['dac_ds']:
-            result = await meas(topic_dict, msg)
+            result = await meas(topic_dict, msg, client)
         else:
             result = dac(topic_dict, msg)
         if result == 'unknown measurement type':
