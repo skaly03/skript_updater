@@ -351,6 +351,7 @@ async def main_callback(topic, msg, retained, qos, dup):
         await client.publish(glob['topic_prefix'] + f'/Zustand_Messplatz/{glob["board_id"]}', 'ready'.encode('utf-8'))
     
     elif topic == glob['topic_prefix'] + '/update':
+        await client.publish(glob['topic_prefix'] + f'/Zustand_Messplatz/{glob["board_id"]}', 'updating currently running script...'.encode('utf-8'))
         await updater()
         machine.reset()
 
