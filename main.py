@@ -87,8 +87,8 @@ async def register_config():
 
     mywlan.connect()
 
-    register_config['server'] = 'broker.hivemq.com'
-    register_config['port'] = 1883
+    register_config['server'] = '172.20.10.7'
+    register_config['port'] = 8001
     register_config['client_id'] = mac_addr + '-r'
     register_config['ssid'] = 'iPhone von Tobi'
     register_config['wifi_pw'] = 'WlanPasswort3344!'
@@ -372,8 +372,8 @@ async def main():
     main_config = glob['main_config']
     # for now: if last-will is defined: rpi pico will lose its connection to the broker: dead socket - needs to be fixed for the purpose below
     # mqtt_async.config['will'] = mqtt_async.MQTTMessage(f'{glob["topic_prefix"]}/Zustand_Messplatz/{glob["board_id"]}', 'offline')
-    main_config['server'] = 'broker.hivemq.com'
-    main_config['port'] = 1883
+    main_config['server'] = '172.20.10.7'
+    main_config['port'] = 8001
     main_config['client_id'] = glob['mac_addr']
     main_config['ssid'] = 'iPhone von Tobi'
     main_config['wifi_pw'] = 'WlanPasswort3344!'
