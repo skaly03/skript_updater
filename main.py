@@ -73,6 +73,12 @@ async def register_loop(register_client):
             await register_client.disconnect()
             break
 
+async def register_wifi(wifi_request):
+    if wifi_request == True:
+        mywlan.connect()
+    else:
+        mywlan.connect(force_disconnect=True)
+
 async def register_config():
     global glob
     register_config = glob['register_config']
@@ -80,23 +86,23 @@ async def register_config():
     # provide a already enabled wifi interface to the config file -> line 67 ff
     wlan = network.WLAN(network.STA_IF)
     wlan.active(True)
-
+    
     wlan_mac = wlan.config('mac')
     mac_addr = wlan_mac.hex(':')
     glob['mac_addr'] = mac_addr
-
     mywlan.connect()
 
-    register_config['server'] = '172.20.10.7'
-    register_config['port'] = 8001
+    register_config['server'] = 'broker.hivemq.com'
+    register_config['port'] = 1883
     register_config['client_id'] = mac_addr + '-r'
-    register_config['ssid'] = 'iPhone von Tobi'
-    register_config['wifi_pw'] = 'WlanPasswort3344!'
+    register_config['ssid'] = 'bobbel'
+    register_config['wifi_pw'] = '_DiWL1B&!24'
     register_config['interface'] = wlan
     register_config['clean'] = False
     register_config['keepalive'] = 30
     register_config['subs_cb'] = register_callback
     register_config['connect_coro'] = register_conn_callback
+    register_config['wifi_coro'] = register_wifi
 
 
     register_client = mqtt_async.MQTTClient(register_config)
@@ -169,6 +175,7 @@ async def meas(topic_dict, value_dict, client):
 
     username = topic_dict['username']
     meas_type = topic_dict['meas_type']
+    time_stamp = topic_dict['time_stamp']
     board_id = glob['board_id']
     
     adc_ds = ADC(Pin(26))
@@ -226,7 +233,7 @@ async def meas(topic_dict, value_dict, client):
                 break_bool = True
                 break
             # Publish for every loop iteration
-            await client.publish(glob['topic_prefix'] + f"/Einzeln/{username}/{board_id}/{meas_type}", json.dumps({'U_DS': adc_ds_value, 'U_GS': adc_gs_value, 'I_D': Ib_current}).encode('utf-8'))
+            await client.publish(glob['topic_prefix'] + f"/Einzeln/{username}/{time_stamp}/{board_id}/{meas_type}", json.dumps({'U_DS': adc_ds_value, 'U_GS': adc_gs_value, 'I_D': Ib_current}).encode('utf-8'))
             # Now we want to add those variables to the created list variables above
             adc_ds_list.append(adc_ds_value)
             adc_gs_list.append(adc_gs_value)
@@ -252,7 +259,7 @@ async def meas(topic_dict, value_dict, client):
                 break_bool = True
                 break
             # Publish for every loop iteration
-            await client.publish(glob['topic_prefix'] + f"/Einzeln/{username}/{board_id}/{meas_type}", json.dumps({'U_DS': adc_ds_value, 'U_GS': adc_gs_value, 'I_D': Ib_current}).encode('utf-8'))
+            await client.publish(glob['topic_prefix'] + f"/Einzeln/{username}/{time_stamp}/{board_id}/{meas_type}", json.dumps({'U_DS': adc_ds_value, 'U_GS': adc_gs_value, 'I_D': Ib_current}).encode('utf-8'))
             # Now we want to add those variables to the created list variables above
             adc_ds_list.append(adc_ds_value)
             adc_gs_list.append(adc_gs_value)
@@ -285,7 +292,7 @@ async def meas(topic_dict, value_dict, client):
                     break_bool = True
                     break
                 # Publish for every loop iteration
-                await client.publish(glob['topic_prefix'] + f"/Einzeln/{username}/{board_id}/{meas_type}", json.dumps({'U_DS': adc_ds_value, 'U_GS': adc_gs_value, 'I_D': Ib_current}).encode('utf-8'))
+                await client.publish(glob['topic_prefix'] + f"/Einzeln/{username}/{time_stamp}/{board_id}/{meas_type}", json.dumps({'U_DS': adc_ds_value, 'U_GS': adc_gs_value, 'I_D': Ib_current}).encode('utf-8'))
                 # Now we want to add those variables to the created list variables above
                 adc_ds_list.append(adc_ds_value)
                 adc_gs_list.append(adc_gs_value)
@@ -326,22 +333,23 @@ async def main_callback(topic, msg, retained, qos, dup):
     print(f'Nachricht empfangen: Topic={topic}, Nachricht={msg}')
     
     
-    if len(topic_list) == 4 and topic_list[1] == glob['board_id']:
+    if len(topic_list) == 5 and topic_list[1] == glob['board_id']:
         await client.publish(glob['topic_prefix'] + f'/Zustand_Messplatz/{glob["board_id"]}', 'busy'.encode('utf-8'))
         msg = json.loads(msg)
         topic_dict = {
             'username': topic_list[2],
-            'meas_type': topic_list[3]
+            'time_stamp': topic_list[3],
+            'meas_type': topic_list[4]
         }
         if glob['dac_gs'] and glob['dac_ds']:
             result = await meas(topic_dict, msg, client)
         else:
             result = dac(topic_dict, msg)
         if result == 'unknown measurement type':
-            await client.publish(glob['topic_prefix'] + f'/Paket/{topic_list[2]}/{glob["board_id"]}/{topic_list[3]}', result.encode('utf-8'))
+            await client.publish(glob['topic_prefix'] + f'/Paket/{topic_list[2]}/{topic_list[3]}/{glob["board_id"]}/{topic_list[3]}', result.encode('utf-8'))
         else:
             result = json.dumps(result)
-            await client.publish(glob['topic_prefix'] + f'/Paket/{topic_list[2]}/{glob["board_id"]}/{topic_list[3]}', result.encode('utf-8'))
+            await client.publish(glob['topic_prefix'] + f'/Paket/{topic_list[2]}/{topic_list[3]}/{glob["board_id"]}/{topic_list[3]}', result.encode('utf-8'))
         await client.publish(glob['topic_prefix'] + f'/Zustand_Messplatz/{glob["board_id"]}', 'ready'.encode('utf-8'))
     
     elif topic == glob['topic_prefix'] + '/Status':
@@ -356,7 +364,7 @@ async def main_callback(topic, msg, retained, qos, dup):
         machine.reset()
 
 async def main_conn_callback(client):
-    SUB_TOPIC_MEAS = glob['topic_prefix'] + '/' + glob['board_id'] + '/+/+'
+    SUB_TOPIC_MEAS = glob['topic_prefix'] + '/' + glob['board_id'] + '/+/+/+'
     SUB_TOPIC_CONDITION = glob['topic_prefix'] + '/Zustand_Messplatz'
     SUB_TOPIC_STATUS = glob['topic_prefix'] + '/Status'
     SUB_TOPIC_UPDATE = glob['topic_prefix'] + '/update'
@@ -372,8 +380,8 @@ async def main():
     main_config = glob['main_config']
     # for now: if last-will is defined: rpi pico will lose its connection to the broker: dead socket - needs to be fixed for the purpose below
     # mqtt_async.config['will'] = mqtt_async.MQTTMessage(f'{glob["topic_prefix"]}/Zustand_Messplatz/{glob["board_id"]}', 'offline')
-    main_config['server'] = '172.20.10.7'
-    main_config['port'] = 8001
+    main_config['server'] = 'broker.hivemq.com'
+    main_config['port'] = 1883
     main_config['client_id'] = glob['mac_addr']
     main_config['ssid'] = 'iPhone von Tobi'
     main_config['wifi_pw'] = 'WlanPasswort3344!'
@@ -382,6 +390,7 @@ async def main():
     main_config['keepalive'] = 30
     main_config['subs_cb'] = main_callback
     main_config['connect_coro'] = main_conn_callback
+    main_config['wifi_coro'] = register_wifi
     main_config['client_id'] = glob['mac_addr']
 
 
@@ -396,11 +405,18 @@ async def main():
     #connTask = asyncio.create_task(check_connection())
     blink_task = asyncio.create_task(blink(glob['led'], glob['board_id'], glob['btn_3']))
     mqttTask = asyncio.create_task(mqtt_task())
-    await asyncio.gather(blink_task, mqttTask)
+    keep_alive_Task = asyncio.create_task(keep_alive_man(main_client))
+    await asyncio.gather(blink_task, mqttTask, keep_alive_Task)
 
 async def mqtt_task():
     while True:
         await asyncio.sleep(0.5)
+
+async def keep_alive_man(client):
+    global glob
+    while True:
+        await client.publish(glob['topic_prefix'] + f'/keepalive/{glob["board_id"]}', 'keepalive'.encode('utf-8'))
+        await asyncio.sleep(20)
 
 # needs some further improvement...
 async def check_connection():
@@ -427,3 +443,4 @@ async def updater():
     time.sleep(1)
 
 asyncio.get_event_loop().run_until_complete(main())
+
