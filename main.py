@@ -347,10 +347,10 @@ async def main_callback(topic, msg, retained, qos, dup):
             else:
                 result = dac(topic_dict, msg)
             if result == 'unknown measurement type':
-                await client.publish(glob['topic_prefix'] + f'/Paket/{topic_list[2]}/{topic_list[3]}/{glob["board_id"]}/{topic_list[3]}', result.encode('utf-8'))
+                await client.publish(glob['topic_prefix'] + f'/Paket/{topic_list[2]}/{topic_list[3]}/{glob["board_id"]}/{topic_list[4]}', result.encode('utf-8'))
             else:
                 result = json.dumps(result)
-                await client.publish(glob['topic_prefix'] + f'/Paket/{topic_list[2]}/{topic_list[3]}/{glob["board_id"]}/{topic_list[3]}', result.encode('utf-8'))
+                await client.publish(glob['topic_prefix'] + f'/Paket/{topic_list[2]}/{topic_list[3]}/{glob["board_id"]}/{topic_list[4]}', result.encode('utf-8'))
             await client.publish(glob['topic_prefix'] + f'/Zustand_Messplatz/{glob["board_id"]}', 'ready'.encode('utf-8'))
         
         elif topic == glob['topic_prefix'] + '/Status':
@@ -417,8 +417,8 @@ async def main():
     #connTask = asyncio.create_task(check_connection())
     blink_task = asyncio.create_task(blink(glob['led'], glob['board_id'], glob['btn_3']))
     mqttTask = asyncio.create_task(mqtt_task())
-    keep_alive_Task = asyncio.create_task(keep_alive_man(main_client))
-    await asyncio.gather(blink_task, mqttTask, keep_alive_Task)
+    # keep_alive_Task = asyncio.create_task(keep_alive_man(main_client))
+    await asyncio.gather(blink_task, mqttTask)
 
 async def mqtt_task():
     while True:
