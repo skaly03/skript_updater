@@ -737,16 +737,16 @@ class MQTTClient:
                     # it's time for another ping...
                     self._unacked_pids[PING_PID] = [asyncio.Event(), None]
                     await asyncio.wait_for(self._ping_n_wait(proto), self._c["response_time"])
-                    log.info("Keepalive OK")
+                    log.debug("Keepalive OK")
                     dt = ticks_diff(ticks_ms(), proto.last_ack)
                 sleep_time = rt_ms - dt
                 if sleep_time < rt_ms / 4:  # avoid sending pings too frequently
                     sleep_time = rt_ms / 4
                 await asyncio.sleep_ms(int(sleep_time))
         except Exception as e:
-            log.warning("Keepalive failed...: {}.".format(e))
+            log.debug("Keepalive failed...: {}.".format(e))
             await self._reconnect(proto, "keepalive")
-        log.warning("End of _keep_alive func")
+        log.debug("End of _keep_alive func")
 
     # _reconnect schedules a reconnection if not underway.
     # the proto passed in must be the one that caused the error in order to avoid closing a newly
