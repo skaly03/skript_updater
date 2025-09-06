@@ -742,7 +742,7 @@ class MQTTClient:
                 sleep_time = rt_ms - dt
                 if sleep_time < rt_ms / 4:  # avoid sending pings too frequently
                     sleep_time = rt_ms / 4
-                await asyncio.sleep_ms(sleep_time)
+                await asyncio.sleep_ms(int(sleep_time))
         except Exception as e:
             log.warning("Keepalive failed...: {}.".format(e))
             await self._reconnect(proto, "keepalive")
