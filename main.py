@@ -10,6 +10,7 @@ import random
 import mywlan
 import json
 import time
+import os
 
 # init a global dictionary for useage in multiple functions
 glob = {
@@ -332,37 +333,48 @@ async def main_callback(topic, msg, retained, qos, dup):
     msg = msg.decode('utf-8')
     print(f'Nachricht empfangen: Topic={topic}, Nachricht={msg}')
     
-    
-    if len(topic_list) == 5 and topic_list[1] == glob['board_id']:
-        await client.publish(glob['topic_prefix'] + f'/Zustand_Messplatz/{glob["board_id"]}', 'busy'.encode('utf-8'))
-        msg = json.loads(msg)
-        topic_dict = {
-            'username': topic_list[2],
-            'time_stamp': topic_list[3],
-            'meas_type': topic_list[4]
-        }
-        if glob['dac_gs'] and glob['dac_ds']:
-            result = await meas(topic_dict, msg, client)
-        else:
-            result = dac(topic_dict, msg)
-        if result == 'unknown measurement type':
-            await client.publish(glob['topic_prefix'] + f'/Paket/{topic_list[2]}/{topic_list[3]}/{glob["board_id"]}/{topic_list[3]}', result.encode('utf-8'))
-        else:
-            result = json.dumps(result)
-            await client.publish(glob['topic_prefix'] + f'/Paket/{topic_list[2]}/{topic_list[3]}/{glob["board_id"]}/{topic_list[3]}', result.encode('utf-8'))
-        await client.publish(glob['topic_prefix'] + f'/Zustand_Messplatz/{glob["board_id"]}', 'ready'.encode('utf-8'))
-    
-    elif topic == glob['topic_prefix'] + '/Status':
-        await client.publish(glob['topic_prefix'] + f'/Status/Messplatz_{glob["board_id"]}', 'online status confirmed'.encode('utf-8'))
-    
-    elif topic == glob['topic_prefix'] + '/Zustand_Messplatz':
-        await client.publish(glob['topic_prefix'] + f'/Zustand_Messplatz/{glob["board_id"]}', 'ready'.encode('utf-8'))
-    
-    elif topic == glob['topic_prefix'] + '/update':
-        await client.publish(glob['topic_prefix'] + f'/Zustand_Messplatz/{glob["board_id"]}', 'updating currently running script...'.encode('utf-8'))
-        await updater()
-        machine.reset()
-
+    try:
+        if len(topic_list) == 5 and topic_list[1] == glob['board_id']:
+            await client.publish(glob['topic_prefix'] + f'/Zustand_Messplatz/{glob["board_id"]}', 'busy'.encode('utf-8'))
+            msg = json.loads(msg)
+            topic_dict = {
+                'username': topic_list[2],
+                'time_stamp': topic_list[3],
+                'meas_type': topic_list[4]
+            }
+            if glob['dac_gs'] and glob['dac_ds']:
+                result = await meas(topic_dict, msg, client)
+            else:
+                result = dac(topic_dict, msg)
+            if result == 'unknown measurement type':
+                await client.publish(glob['topic_prefix'] + f'/Paket/{topic_list[2]}/{topic_list[3]}/{glob["board_id"]}/{topic_list[3]}', result.encode('utf-8'))
+            else:
+                result = json.dumps(result)
+                await client.publish(glob['topic_prefix'] + f'/Paket/{topic_list[2]}/{topic_list[3]}/{glob["board_id"]}/{topic_list[3]}', result.encode('utf-8'))
+            await client.publish(glob['topic_prefix'] + f'/Zustand_Messplatz/{glob["board_id"]}', 'ready'.encode('utf-8'))
+        
+        elif topic == glob['topic_prefix'] + '/Status':
+            await client.publish(glob['topic_prefix'] + f'/Status/Messplatz_{glob["board_id"]}', 'online status confirmed'.encode('utf-8'))
+        
+        elif topic == glob['topic_prefix'] + '/Zustand_Messplatz':
+            await client.publish(glob['topic_prefix'] + f'/Zustand_Messplatz/{glob["board_id"]}', 'ready'.encode('utf-8'))
+        
+        elif topic == glob['topic_prefix'] + '/update':
+            try:
+                msg = json.loads(msg)
+            except:
+                pass
+            if type(msg) == dict and len(msg) == 2:
+                await client.publish(glob['topic_prefix'] + f'/debug/{glob["board_id"]}', f'updating {msg['file']}'.encode('utf-8'))
+                await updater(msg['file'], msg['folder'])
+            elif type(msg) == str:
+                await client.publish(glob['topic_prefix'] + f'/debug/{glob["board_id"]}', f'updating {msg}'.encode('utf-8'))
+                await updater(msg)
+            else:
+                return # do nothing
+            machine.reset()
+    except Exception as e:
+        await client.publish(glob['topic_prefix'] + f'/debug/{glob["board_id"]}', f'An Error occured: {e}'.encode('utf-8'))
 async def main_conn_callback(client):
     SUB_TOPIC_MEAS = glob['topic_prefix'] + '/' + glob['board_id'] + '/+/+/+'
     SUB_TOPIC_CONDITION = glob['topic_prefix'] + '/Zustand_Messplatz'
@@ -435,12 +447,20 @@ async def check_connection():
             client.connect()
 
 # new function to remotely change the currently running script. Command via mqtt
-async def updater():
-    url = 'https://raw.githubusercontent.com/skaly03/skript_updater/main/main.py'
+async def updater(file_name, folder=None):
+    url = f'https://raw.githubusercontent.com/skaly03/skript_updater/main/{file_name}'
     r = urequests.get(url)
-    with open('main.py', 'w') as file:
-        file.write(r.text)
-    time.sleep(1)
+    if folder:
+        if folder not in os.listdir():
+            os.mkdir(folder)
+        with open(f'{folder}/{file_name}', 'w') as file:
+            file.write(r.text)
+        time.sleep(1)
+    else:
+        with open(file_name, 'w') as file:
+            file.write(r.text)
+        time.sleep(1)
 
 asyncio.get_event_loop().run_until_complete(main())
+
 
