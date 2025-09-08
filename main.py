@@ -1,6 +1,7 @@
 from machine import Pin, I2C, ADC
 from mcp4725 import MCP4725
-from hw_emu import dac
+from hw_emu import dac as emu
+from sync_time import ntp_sync
 import _thread
 import mqtt_async
 import asyncio
@@ -10,14 +11,31 @@ import random
 import mywlan
 import json
 import time
+import gc
 import os
 
+from ulogging import RotatingLogger
+logger = RotatingLogger(
+    name="main",
+    console_level=RotatingLogger.DEBUG,
+    file_level=RotatingLogger.WARNING,
+    filename="logging.txt",
+    max_size=50*1024
+)
+# init a config to be edited by users
+config = {
+    'mqtt_server': 'broker.hivemq.com',
+    'mqtt_port': 1883,
+}
 # init a global dictionary for useage in multiple functions
 glob = {
     # HW-variables
     'dac_ds': None,
     'dac_gs': None,
-    'led': None,
+    'led_board': None,
+    'led_1': None,
+    'led_2': None,
+    'led_3': None,
     'btn_1': None,
     'btn_2': None,
     'btn_3': None,
@@ -30,96 +48,215 @@ glob = {
     'register_client': None,
     # Board-specific variables
     'board_id': False,
-    'mac_addr': None
+    'mac_addr': None, 
+    'wlan': None,
     }
+# ------------------------------------
+#  MQTT: Start of registration process
+# ------------------------------------
+
+async def wifi_conn(wifi_request):
+    """
+    ### Wifi Management
+
+    Works with an additional Python script `mywlan.py` that detects
+    all networks in the vicinity and compares them with the SSIDs and
+    passwords stored in the `mywlan_ssids.json` file. If a known network
+    is found, the script attempts to establish a connection.
+
+        Args:
+            wifi_request (bool or str)
+            * to establish a wifi connection:       True
+            * to disconnect from a wifi connection: False
+            * to re-establish the connection:       'reconnect'
+        Returns:
+            None
+        Note:
+            The scripts `mywlan.py` and `mywlan_ssids.json` or another network manager should be
+            present and correctly configured.
+    """
+    global glob
+    wlan = glob['wlan']
+    if wifi_request == True and not wlan.isconnected():
+            mywlan.connect()
+            logger.info('wifi connection established')
+    elif wifi_request == False and wlan.isconnected():
+        mywlan.connect(force_disconnect=True)
+        logger.info('wifi disconnected')
+    elif wifi_request == 'reconnect' and wlan.isconnected():
+        mywlan.connect(force_reconnect=True)
+        logger.info('wifi reconnected')
+    else:
+        # requested already established/disconnected connection. Request will be ignored
+        pass
+
+async def broker_conn_loop(client):
+    """
+    ### Broker connection loop
+
+    Loops around until the connection to the configured broker is established successfully.
+    * First attempt: try to establish a connection
+    * Second attempt: try reconnecting to the wifi and then establishing a connection to the broker
+
+    The system will loop around those cases and try to connect until a connection is established.
+    
+        Args:
+            client (client-object)
+        Returns:
+            None
+        Note:
+            Uses the wifi_conn() function
+    """
+    while client._state != 1:
+        try:
+            try:
+                await client.connect()
+            except Exception as e:
+                logger.debug('Could not reach broker... reconnecting wifi...')
+                await wifi_conn('reconnect')
+                await client.connect()
+        except Exception as e:
+            logger.critical(f'could not connect to broker: {e}')
+            asyncio.sleep(10)
+            continue
+
+async def register_conn_callback(client):
+    """
+    Is called when a connection to the broker has been established.
+        Args:
+            * client (client-object)
+        returns:
+            None
+    """
+    # managing subscriptions...
+    SUB_TOPIC_REGISTER = f"{glob['topic_prefix']}/register_done/{glob['mac_addr']}"
+    await client.subscribe(SUB_TOPIC_REGISTER, 1)
+    logger.debug('register topic subscription succesful')
 
 async def register_callback(topic, msg, retained, qos, dup):
+    """
+    ### MQTT-Callback of the registration client
+
+    Is called when a message is recieved via MQTT on the subscribed topics.
+    Takes the arguments `msg` and `topic` which are filtered further. These
+    callbacks then trigger the desired functions.
+    
+        Args:
+            * topic
+            * msg
+            * retained
+            * qos
+            * dup
+        Returns:
+            All returns are published via MQTT
+        Exceptions:
+            All exceptions within the callbacks will trigger an Error and terminate this function.
+    """
     global glob
-    client = glob['register_client']
-    mac_addr = glob['mac_addr']
+    # client = glob['register_client']
+    # mac_addr = glob['mac_addr']
     
     topic = topic.decode('utf-8')
     msg = msg.decode('utf-8')
-    print(f'Nachricht empfangen: Topic={topic}, Nachricht={msg}')
+    logger.debug(f'recieved mqtt message at {topic}, Payload: {msg}')
 
     try:
-        if topic == glob['topic_prefix'] + f'/register_done/{mac_addr}':
+        # measuring station recieves its board_id here, regsitration within the database
+        if topic == f"{glob['topic_prefix']}/register_done/{glob['mac_addr']}":
             glob['board_id'] = msg
-        
-        if topic == glob['topic_prefix'] + '/Status':
-            await client.publish(glob['topic_prefix'] + '/Status/Messplatz', 'Messplatz 1 online'.encode('utf-8'))
+            logger.debug('board_id set')
 
-    except KeyError as e:
-        await client.publish('test/meas/lastError', 'fehlender Key in Daten'.encode('utf-8'))
-        print('Fehlender Key')
     except Exception as e:
-        await client.publish('test/meas/lastError', 'fatal data error - could not read data'.encode('utf-8'))
-        print(f'Unerwarteter Fehler, {e}')
-        raise
-
-async def register_conn_callback(client):
-    SUB_TOPIC_REGISTER = glob['topic_prefix'] + f'/register_done/{glob['mac_addr']}'
-    await client.subscribe(SUB_TOPIC_REGISTER, 1)
+        logger.warning(f'error in register_callback: {e}')
 
 async def register_message(register_client):
+    """
+    Sends a message via MQTT every 10 seconds in a loop until the board registration is complete.
+        Args:
+            register_client (client-object)
+        Returns:
+            None
+    """
     global glob
-    while not glob['board_id']:
-        await register_client.publish(glob['topic_prefix'] + '/register/' + glob['mac_addr'], glob['mac_addr'].encode('utf-8'))
+    while not glob['board_id']: # loop ends when a board_id has been assigned
+        # if the database or manager is not yet online
+        topic = f"{glob['topic_prefix']}/register/{glob['mac_addr']}"
+        payload = glob['mac_addr'].encode('utf-8')
+        await register_client.publish(topic, payload)
+        logger.debug(f'Publish at {topic}, Payload: {payload}')
         await asyncio.sleep(10)
 
 async def register_loop(register_client):
+    """
+    Main loop of the registration process. Will terminate when the process is done.
+        Args:
+            register_client (client-object)
+        Returns:
+            None
+    """
     while True:
         await asyncio.sleep(0.5)
         if glob['board_id'] != False:
+            logger.info('registration process complete, disconnecting from broker...')
             await register_client.disconnect()
             break
 
-async def register_wifi(wifi_request):
-    if wifi_request == True:
-        mywlan.connect()
-    else:
-        mywlan.connect(force_disconnect=True)
-
 async def register_config():
+    """
+    Must be called from a asyncio-eventloop. Configures and controls the registration process.
+    """
     global glob
+    global config
     register_config = glob['register_config']
 
-    # provide a already enabled wifi interface to the config file -> line 67 ff
-    wlan = network.WLAN(network.STA_IF)
-    wlan.active(True)
-    
+    # provide a already enabled wifi interface to the config file
+    wlan = mywlan._init_wlan()
     wlan_mac = wlan.config('mac')
     mac_addr = wlan_mac.hex(':')
     glob['mac_addr'] = mac_addr
-    mywlan.connect()
+    glob['wlan'] = wlan
+    await wifi_conn(True)
+    try:
+        ntp_sync()
+    except:
+        logger.warning('NTP time failed')
 
-    register_config['server'] = 'broker.hivemq.com'
-    register_config['port'] = 1883
+    register_config['server'] = config['mqtt_server']
+    register_config['port'] = config['mqtt_port']
     register_config['client_id'] = mac_addr + '-r'
-    register_config['ssid'] = 'bobbel'
-    register_config['wifi_pw'] = '_DiWL1B&!24'
     register_config['interface'] = wlan
     register_config['clean'] = False
     register_config['keepalive'] = 30
     register_config['subs_cb'] = register_callback
     register_config['connect_coro'] = register_conn_callback
-    register_config['wifi_coro'] = register_wifi
-
+    # skipping internal wifi management, using my own...
+    register_config['wifi_coro'] = wifi_conn
+    # an error will occur if those strings are not set -> must be something else then None
+    register_config['ssid'] = 'must_be_any_string'
+    register_config['wifi_pw'] = 'must_be_any_string'
 
     register_client = mqtt_async.MQTTClient(register_config)
     glob['register_config'] = register_config
     glob['register_client'] = register_client
-    await register_client.connect()
-
-    print('client ready for registration')
+    await broker_conn_loop(register_client)
+    logger.debug('connection to broker successful')
+    logger.info('start registration process')
     await asyncio.gather(register_loop(register_client), register_message(register_client))
 
 asyncio.get_event_loop().run_until_complete(register_config())
 
 # start of mainly used loop for mqtt communication and measurement
 time.sleep(5) # to make sure to be disconnected from broker
+gc.collect()
+
+# ----------------------------
+# MQTT: start of main function
+# ----------------------------
 
 async def init_hw():
+    """
+    Initialises the desired hardware, if available.
+    """
     global glob
     i2c = I2C(id=0, scl=Pin(17), sda=Pin(16), freq=400000)
     try:
@@ -131,13 +268,24 @@ async def init_hw():
         print('no hardware found, change into emulation mode')
         glob['dac_ds'] = None
         glob['dac_gs'] = None
-    glob['led'] = Pin('LED', Pin.OUT)
     glob['btn_1'] = Pin(0, Pin.IN, Pin.PULL_UP)
     glob['btn_2'] = Pin(1, Pin.IN, Pin.PULL_UP)
     glob['btn_3'] = Pin(2, Pin.IN, Pin.PULL_UP)
+    glob['led_1'] = Pin(3, Pin.OUT)
+    glob['led_2'] = Pin(4, Pin.OUT)
+    glob['led_3'] = Pin(5, Pin.OUT)
+    glob['led_board'] = Pin('LED', Pin.OUT)
+    logger.debug('init_hw done')
 
 # runs, if btn_3 is pressed
 async def blink(led, board_id, btn_3):
+    """
+    Function for identifying a board or the board_id via an LED
+        Args:
+            * led (Pin-object)
+            * board_id (str)
+            * btn (Pin-object)
+    """
     while True:
         if btn_3.value() == 0:
             board_id = int(board_id)
@@ -148,29 +296,28 @@ async def blink(led, board_id, btn_3):
                 await asyncio.sleep(0.2)     
         await asyncio.sleep(5)
 
-async def meas(topic_dict, value_dict, client):
+async def meas(topic_dict: dict, value_dict: dict, client):
+    """
+    ### Main measurement funciton. Description tba
+
+    topic_list needs topic_prefix/board_id/username/messung
+    #### additional arguments are needed
+
+        * for meas_type 1: single values for u_gs and u_ds; optional: Multi-factor
+            * example: {'U_DS': 2.0, 'U_GS': 2.2, 'multi': 100}
+
+        * for meas_type 2: single value for u_gs, list of u_ds[start, stop, step]
+            * example: {'U_DS': [0, 3.0, 0.25], 'U_GS': 2.0}
+
+        * for meas_type 3: single value for u_ds, list of u_gs[start, stop, step]
+            * example: {'U_DS': 2.0, 'U_GS': [1.0, 2.0, 0.1]}
+
+        * for meas_type 4: list of [start, step, stop] for both u_gs and u_ds is needed
+            * example: {'U_DS': [0, 3.3, 0.1], 'U_GS': [1, 3, 0.5]}
+    
+    """
+
     global glob
-    # topic_list needs: topic_prefix/board_id/username/messung
-    # additional arguments are needed:
-
-    # for meas_type 1: single values for u_gs and u_ds; optional: Multi-factor
-    # example: {'U_DS': 2.0, 'U_GS': 2.2, 'multi': 100}
-
-    # for meas_type 2: single value for u_gs, list of u_ds[start, stop, step]
-    # example: {'U_DS': [0, 3.0, 0.25], 'U_GS': 2.0}
-
-    # for meas_type 3: single value for u_ds, list of u_gs[start, stop, step]
-    # example: {'U_DS': 2.0, 'U_GS': [1.0, 2.0, 0.1]}
-
-    # for meas_type 4: list of [start, step, stop] for both u_gs and u_ds is needed
-    # example: {'U_DS': [0, 3.3, 0.1], 'U_GS': [1, 3, 0.5]}
-
-    #    for element in ADC_Ib:
-    #    multi = 110/47
-    #    voltage = element / multi
-    #    current = voltage / 8
-    #    Ib.append(current)
-
     dac_ds = glob['dac_ds']
     dac_gs = glob['dac_gs']
 
@@ -186,6 +333,7 @@ async def meas(topic_dict, value_dict, client):
     adcMax = 2**16 # 16 Bit
     adcVDD = 3.3   # Volt
     U_1 = 4095/adcVDD # reference-value for dac's: is used to iterate over 4095 states for Voltages fom 0 to 3.3 V
+    topic = f"{glob['topic_prefix']}/Einzeln/{username}/{time_stamp}/{board_id}/{meas_type}"
 
     if meas_type == 'Single-Measurement':
         if value_dict.get('multi') != None:
@@ -212,6 +360,7 @@ async def meas(topic_dict, value_dict, client):
         av_ds = sum(multi_lst_ds) / len(multi_lst_ds)
         av_gs = sum(multi_lst_gs) / len(multi_lst_gs)
         av_Ib = sum(multi_lst_Ib) / len(multi_lst_Ib)
+        gc.collect()
         return_dict = {'U_DS': av_ds, 'U_GS': av_gs, 'I_D': av_Ib, 'break_bool': break_bool}
     
     elif meas_type == 'Drain-Source-Sweep':
@@ -234,11 +383,16 @@ async def meas(topic_dict, value_dict, client):
                 break_bool = True
                 break
             # Publish for every loop iteration
-            await client.publish(glob['topic_prefix'] + f"/Einzeln/{username}/{time_stamp}/{board_id}/{meas_type}", json.dumps({'U_DS': adc_ds_value, 'U_GS': adc_gs_value, 'I_D': Ib_current}).encode('utf-8'))
+            payload = json.dumps({'U_DS': adc_ds_value, 'U_GS': adc_gs_value, 'I_D': Ib_current}).encode('utf-8')
+            await client.publish(topic, payload)
+            logger.debug(f'Publish at {topic}, Payload: {payload}')
             # Now we want to add those variables to the created list variables above
             adc_ds_list.append(adc_ds_value)
             adc_gs_list.append(adc_gs_value)
             adc_Ib_list.append(Ib_current)
+        logger.debug(f'Bevore allocation: {gc.mem_free()/1000} kB')
+        gc.collect()
+        logger.debug(f'After allocation: {gc.mem_free()/1000} kB')
         return_dict = {'U_DS': adc_ds_list, 'U_GS': adc_gs_list, 'I_D': adc_Ib_list, 'break_bool': break_bool}
 
     elif topic_dict['meas_type'] == 'Gate-Source-Sweep':
@@ -260,11 +414,16 @@ async def meas(topic_dict, value_dict, client):
                 break_bool = True
                 break
             # Publish for every loop iteration
-            await client.publish(glob['topic_prefix'] + f"/Einzeln/{username}/{time_stamp}/{board_id}/{meas_type}", json.dumps({'U_DS': adc_ds_value, 'U_GS': adc_gs_value, 'I_D': Ib_current}).encode('utf-8'))
+            payload = json.dumps({'U_DS': adc_ds_value, 'U_GS': adc_gs_value, 'I_D': Ib_current}).encode('utf-8')
+            await client.publish(topic, payload)
+            logger.debug(f'Publish at {topic}, Payload: {payload}')
             # Now we want to add those variables to the created list variables above
             adc_ds_list.append(adc_ds_value)
             adc_gs_list.append(adc_gs_value)
             adc_Ib_list.append(Ib_current)
+        logger.debug(f'Bevore allocation: {gc.mem_free()/1000} kB')
+        gc.collect()
+        logger.debug(f'After allocation: {gc.mem_free()/1000} kB')
         return_dict = {'U_DS': adc_ds_list, 'U_GS': adc_gs_list, 'I_D': adc_Ib_list, 'break_bool': break_bool}
     
     elif topic_dict['meas_type'] == 'Combined-Sweep':
@@ -293,7 +452,9 @@ async def meas(topic_dict, value_dict, client):
                     break_bool = True
                     break
                 # Publish for every loop iteration
-                await client.publish(glob['topic_prefix'] + f"/Einzeln/{username}/{time_stamp}/{board_id}/{meas_type}", json.dumps({'U_DS': adc_ds_value, 'U_GS': adc_gs_value, 'I_D': Ib_current}).encode('utf-8'))
+                payload = json.dumps({'U_DS': adc_ds_value, 'U_GS': adc_gs_value, 'I_D': Ib_current}).encode('utf-8')
+                await client.publish(topic, payload)
+                logger.debug(f'Publish at {topic}, Payload: {payload}')
                 # Now we want to add those variables to the created list variables above
                 adc_ds_list.append(adc_ds_value)
                 adc_gs_list.append(adc_gs_value)
@@ -305,24 +466,16 @@ async def meas(topic_dict, value_dict, client):
             # update and reset those values to ensure measurement-sweep
             gs_calculated_value = gs_calculated_value + value_dict['U_GS'][2]
             ds_calculated_value = value_dict['U_DS'][0]
+            logger.debug(f'Bevore allocation: {gc.mem_free()/1000} kB')
+            gc.collect()
+            logger.debug(f'After allocation: {gc.mem_free()/1000} kB')
         return_dict = {'U_DS': main_ds_list, 'U_GS': main_gs_list, 'I_D': main_Ib_list, 'break_bool': break_bool}
     else:
         return 'unknown measurement type'
     # sustain output low if the measurement is done
     dac_gs.write(0)
     dac_ds.write(0)
-
-    #data_dict = {
-    #    "username": topic_list[2],
-    #    "board_id": int(glob['board_id']),
-    #    "meas_type": topic_list[3],
-    #    "U_DS": [2.0],
-    #    "U_GS": [2.2],
-    #    "I_D": [70]
-    #}
-    #await asyncio.sleep(5)
-    #return data_dict
-    
+    logger.debug('meas_task complete')
     return return_dict 
 
 async def main_callback(topic, msg, retained, qos, dup):
@@ -331,79 +484,114 @@ async def main_callback(topic, msg, retained, qos, dup):
     topic = topic.decode('utf-8')
     topic_list = topic.split('/')
     msg = msg.decode('utf-8')
-    print(f'Nachricht empfangen: Topic={topic}, Nachricht={msg}')
+    logger.debug(f'recieved mqtt message at {topic}, Payload: {msg}')
+
+    condition_topic = f"{glob['topic_prefix']}/Zustand_Messplatz/{glob["board_id"]}"
     
     try:
         if len(topic_list) == 5 and topic_list[1] == glob['board_id']:
-            await client.publish(glob['topic_prefix'] + f'/Zustand_Messplatz/{glob["board_id"]}', 'busy'.encode('utf-8'))
+            payload = 'busy'.encode('utf-8')
+            await client.publish(condition_topic, payload)
+            logger.debug(f'Publish at {condition_topic}, Payload: {payload}')
+
             msg = json.loads(msg)
             topic_dict = {
                 'username': topic_list[2],
                 'time_stamp': topic_list[3],
                 'meas_type': topic_list[4]
             }
+            # checks whether hardware is available or whether emulation is required
             if glob['dac_gs'] and glob['dac_ds']:
                 result = await meas(topic_dict, msg, client)
             else:
-                result = dac(topic_dict, msg)
-            if result == 'unknown measurement type':
-                await client.publish(glob['topic_prefix'] + f'/Paket/{topic_list[2]}/{topic_list[3]}/{glob["board_id"]}/{topic_list[4]}', result.encode('utf-8'))
-            else:
+                result = emu(topic_dict, msg)
+            
+            if result != 'unknown measurement type':
                 result = json.dumps(result)
-                await client.publish(glob['topic_prefix'] + f'/Paket/{topic_list[2]}/{topic_list[3]}/{glob["board_id"]}/{topic_list[4]}', result.encode('utf-8'))
-            await client.publish(glob['topic_prefix'] + f'/Zustand_Messplatz/{glob["board_id"]}', 'ready'.encode('utf-8'))
+            
+            data_topic = f"{glob['topic_prefix']}/Paket/{topic_list[2]}/{topic_list[3]}/{glob["board_id"]}/{topic_list[4]}"
+            payload = result.encode('utf-8')
+            await client.publish(data_topic, payload)
+            logger.debug(f'Publish at {data_topic}, Payload: {payload}')
+            
+            payload = 'ready'.encode('utf-8')
+            await client.publish(condition_topic, payload)
+            logger.debug(f'Publish at {condition_topic}, Payload: {payload}')
         
-        elif topic == glob['topic_prefix'] + '/Status':
-            await client.publish(glob['topic_prefix'] + f'/Status/Messplatz_{glob["board_id"]}', 'online status confirmed'.encode('utf-8'))
+        elif topic == f"{glob['topic_prefix']}/Status":
+            status_topic = f"{topic}/Messplatz_{glob["board_id"]}"
+            payload = 'online status confirmed'.encode('utf-8')
+            await client.publish(status_topic, payload)
+            logger.debug(f'Publish at {status_topic}, Payload: {payload}')
+
+        elif topic == f"{glob['topic_prefix']}/Zustand_Messplatz":
+            payload = 'ready'.encode('utf-8')
+            await client.publish(condition_topic, payload)
+            logger.debug(f'Publish at {condition_topic}, Payload: {payload}')
         
-        elif topic == glob['topic_prefix'] + '/Zustand_Messplatz':
-            await client.publish(glob['topic_prefix'] + f'/Zustand_Messplatz/{glob["board_id"]}', 'ready'.encode('utf-8'))
-        
-        elif topic == glob['topic_prefix'] + '/update':
-            try:
+        elif topic == f"{glob['topic_prefix']}/update":
+            try: # First case: Message contains a dictionary with filename and foldername that needs to be updated
                 msg = json.loads(msg)
-            except:
+            except:# Second case: Message contains a string with filename
                 pass
+            update_topic = f"{glob['topic_prefix']}/debug/{glob["board_id"]}"
+
             if type(msg) == dict and len(msg) == 2:
-                await client.publish(glob['topic_prefix'] + f'/debug/{glob["board_id"]}', f'updating {msg['file']}'.encode('utf-8'))
+                payload = f'updating {msg['file']}'.encode('utf-8')
+                await client.publish(update_topic, payload)
+                logger.debug(f'Publish at {update_topic}, Payload: {payload}')
+
                 await updater(msg['file'], msg['folder'])
+
             elif type(msg) == str:
-                await client.publish(glob['topic_prefix'] + f'/debug/{glob["board_id"]}', f'updating {msg}'.encode('utf-8'))
+                payload = f'updating {msg}'.encode('utf-8')
+                await client.publish(update_topic, payload)
+                logger.debug(f'Publish at {update_topic}, Payload: {payload}')
+
                 await updater(msg)
             else:
                 return # do nothing
+            
+            logger.warning(f'file {msg['file']} updated')
             machine.reset()
     except Exception as e:
-        await client.publish(glob['topic_prefix'] + f'/debug/{glob["board_id"]}', f'An Error occured: {e}'.encode('utf-8'))
+        debug_topic = f"{glob['topic_prefix']}/debug/{glob["board_id"]}"
+        payload = f'An Error occured: {e}'.encode('utf-8')
+        await client.publish(debug_topic, payload)
+        logger.debug(f'Publish at {debug_topic}, Payload: {payload}')
+
+    gc.collect()
+
 async def main_conn_callback(client):
-    SUB_TOPIC_MEAS = glob['topic_prefix'] + '/' + glob['board_id'] + '/+/+/+'
-    SUB_TOPIC_CONDITION = glob['topic_prefix'] + '/Zustand_Messplatz'
-    SUB_TOPIC_STATUS = glob['topic_prefix'] + '/Status'
-    SUB_TOPIC_UPDATE = glob['topic_prefix'] + '/update'
+    SUB_TOPIC_MEAS      = f"{glob['topic_prefix']}/{glob['board_id']}/+/+/+"
+    SUB_TOPIC_CONDITION = f"{glob['topic_prefix']}/Zustand_Messplatz"
+    SUB_TOPIC_STATUS    = f"{glob['topic_prefix']}/Status"
+    SUB_TOPIC_UPDATE    = f"{glob['topic_prefix'] }/update"
 
     await client.subscribe(SUB_TOPIC_MEAS, 1)
     await client.subscribe(SUB_TOPIC_STATUS, 1)
     await client.subscribe(SUB_TOPIC_UPDATE, 1)
     await client.subscribe(SUB_TOPIC_CONDITION, 1)
-    print('main-sub done')
+    logger.debug('main subscription succesful')
 
 async def main():
     global glob
+    global config
     main_config = glob['main_config']
     # for now: if last-will is defined: rpi pico will lose its connection to the broker: dead socket - needs to be fixed for the purpose below
     # mqtt_async.config['will'] = mqtt_async.MQTTMessage(f'{glob["topic_prefix"]}/Zustand_Messplatz/{glob["board_id"]}', 'offline')
-    main_config['server'] = 'broker.hivemq.com'
-    main_config['port'] = 1883
+    main_config['server'] = config['mqtt_server']
+    main_config['port'] = config['mqtt_port']
     main_config['client_id'] = glob['mac_addr']
-    main_config['ssid'] = 'iPhone von Tobi'
-    main_config['wifi_pw'] = 'WlanPasswort3344!'
     main_config['interface'] = network.WLAN(network.STA_IF)
     main_config['clean'] = False
     main_config['keepalive'] = 30
     main_config['subs_cb'] = main_callback
     main_config['connect_coro'] = main_conn_callback
-    main_config['wifi_coro'] = register_wifi
-    main_config['client_id'] = glob['mac_addr']
+    main_config['wifi_coro'] = wifi_conn
+    # an error will occur if those strings are not set -> must be something else then None
+    main_config['ssid'] = 'must_be_any_string'
+    main_config['wifi_pw'] = 'must_be_any_string'
 
 
     main_client = mqtt_async.MQTTClient(main_config)
@@ -411,42 +599,42 @@ async def main():
     glob['main_client'] = main_client
     
     await init_hw()
-    await main_client.connect()
-    print('client ready')
-    await main_client.publish(glob['topic_prefix'] + f'/Zustand_Messplatz/{glob["board_id"]}', 'ready'.encode('utf-8'))
+    await broker_conn_loop(main_client)
+    logger.info('Connection to broker succesfully established')
+
+    condition_topic = f"{glob['topic_prefix']}/Zustand_Messplatz/{glob["board_id"]}"
+    payload = 'ready'.encode('utf-8')
+    await main_client.publish(condition_topic, payload)
+    logger.debug(f'Publish at {condition_topic}, Payload: {payload}')
+
     #connTask = asyncio.create_task(check_connection())
-    blink_task = asyncio.create_task(blink(glob['led'], glob['board_id'], glob['btn_3']))
+    blink_task = asyncio.create_task(blink(glob['led_board'], glob['board_id'], glob['btn_3']))
     mqttTask = asyncio.create_task(mqtt_task())
-    # keep_alive_Task = asyncio.create_task(keep_alive_man(main_client))
     await asyncio.gather(blink_task, mqttTask)
 
 async def mqtt_task():
     while True:
         await asyncio.sleep(0.5)
 
-async def keep_alive_man(client):
-    global glob
-    while True:
-        await client.publish(glob['topic_prefix'] + f'/keepalive/{glob["board_id"]}', 'keepalive'.encode('utf-8'))
-        await asyncio.sleep(20)
-
-# needs some further improvement...
+# needs some further improvement... may no longer be needed
 async def check_connection():
     global glob
-    client = mqtt_async.MQTTClient(glob['main_config'])
-    if client._proto and client._proto.isconnected():
+    client = (glob['main_client'])
+    if client._state == 1:
         await asyncio.sleep(glob['main_config']['keepalive'])
-    else:
-        print('please wait, we got a problem here...')
+    elif client._state == 2:
         try:
-            client.connect()
-            print('reconnection successful')
-        except Exception as e:
-            print('We got some bigger problems...')
-            mywlan.connect(force_reconnect=True)
-            client.connect()
+            try:
+                client.connect()
+            except Exception as e:
+                mywlan.connect(force_reconnect=True)
+                client.connect()
+        except:
+            config = glob['main_config']
+            main_client = mqtt_async.MQTTClient(config)
+            await broker_conn_loop(main_client)
 
-# new function to remotely change the currently running script. Command via mqtt
+# new function to remotely change currently running script. Command via mqtt
 async def updater(file_name, folder=None):
     url = f'https://raw.githubusercontent.com/skaly03/skript_updater/main/{file_name}'
     r = urequests.get(url)
@@ -461,6 +649,10 @@ async def updater(file_name, folder=None):
             file.write(r.text)
         time.sleep(1)
 
+# async def keep_alive_man(client):
+#     global glob
+#     while True:
+#         await client.publish(glob['topic_prefix'] + f'/keepalive/{glob["board_id"]}', 'keepalive'.encode('utf-8'))
+#         await asyncio.sleep(20)
+
 asyncio.get_event_loop().run_until_complete(main())
-
-
