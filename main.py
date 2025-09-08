@@ -542,6 +542,7 @@ async def main_callback(topic, msg, retained, qos, dup):
                 logger.debug(f'Publish at {update_topic}, Payload: {payload}')
 
                 await updater(msg['file'], msg['folder'])
+                logger.warning(f'file {msg['file']} updated')
 
             elif type(msg) == str:
                 payload = f'updating {msg}'.encode('utf-8')
@@ -549,16 +550,18 @@ async def main_callback(topic, msg, retained, qos, dup):
                 logger.debug(f'Publish at {update_topic}, Payload: {payload}')
 
                 await updater(msg)
+                logger.warning(f'file {msg} updated')
             else:
                 return # do nothing
             
-            logger.warning(f'file {msg['file']} updated')
             machine.reset()
+
     except Exception as e:
         debug_topic = f"{glob['topic_prefix']}/debug/{glob["board_id"]}"
         payload = f'An Error occured: {e}'.encode('utf-8')
         await client.publish(debug_topic, payload)
         logger.debug(f'Publish at {debug_topic}, Payload: {payload}')
+        logger.error('file update error')
 
     gc.collect()
 
