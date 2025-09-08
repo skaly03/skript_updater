@@ -66,7 +66,7 @@ def dac(topic_dict, value_dict):
                 break_bool = True
             I_D_return.append(I_D_row)
 
-        U_GS_return = [[U_GS for U_GS in U_GS_list] for _ in U_GS_list]
+        U_GS_return = [[U_GS[i] for i in range(len(U_GS_list))] for _ in U_GS_list]
         U_DS_return = [[u_ds for u_ds in U_DS_list] for _ in U_GS_list]
 
         return {'U_DS': U_DS_return, 'U_GS': U_GS_return, 'I_D': I_D_return, 'break_bool': break_bool}
