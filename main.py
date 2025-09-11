@@ -129,7 +129,7 @@ async def register_conn_callback(client):
             None
     """
     # managing subscriptions...
-    SUB_TOPIC_REGISTER = f"{glob['topic_prefix']}/register_done/{glob['mac_addr']}"
+    SUB_TOPIC_REGISTER = f"{glob['topic_prefix']}/board_register_done/{glob['mac_addr']}"
     await client.subscribe(SUB_TOPIC_REGISTER, 1)
     logger.debug('register topic subscription succesful')
 
@@ -162,7 +162,7 @@ async def register_callback(topic, msg, retained, qos, dup):
 
     try:
         # measuring station recieves its board_id here, regsitration within the database
-        if topic == f"{glob['topic_prefix']}/register_done/{glob['mac_addr']}":
+        if topic == f"{glob['topic_prefix']}/board_register_done/{glob['mac_addr']}":
             glob['board_id'] = msg
             logger.debug('board_id set')
 
@@ -180,7 +180,7 @@ async def register_message(register_client):
     global glob
     while not glob['board_id']: # loop ends when a board_id has been assigned
         # if the database or manager is not yet online
-        topic = f"{glob['topic_prefix']}/register/{glob['mac_addr']}"
+        topic = f"{glob['topic_prefix']}/board_register/{glob['mac_addr']}"
         payload = glob['mac_addr'].encode('utf-8')
         await register_client.publish(topic, payload)
         logger.debug(f'Publish at {topic}, Payload: {payload}')
@@ -294,7 +294,7 @@ async def blink(led, board_id, btn_3):
                 await asyncio.sleep(0.2)
                 led.off()
                 await asyncio.sleep(0.2)     
-        await asyncio.sleep(5)
+        await asyncio.sleep(2)
 
 async def meas(topic_dict: dict, value_dict: dict, client):
     """
@@ -306,14 +306,14 @@ async def meas(topic_dict: dict, value_dict: dict, client):
         * for meas_type 1: single values for u_gs and u_ds; optional: Multi-factor
             * example: {'U_DS': 2.0, 'U_GS': 2.2, 'multi': 100}
 
-        * for meas_type 2: single value for u_gs, list of u_ds[start, stop, step]
+        * for meas_type 2: single value for u_gs, list of u_ds[value_1, value_2, ...]
             * example: {'U_DS': [0, 3.0, 0.25], 'U_GS': 2.0}
 
-        * for meas_type 3: single value for u_ds, list of u_gs[start, stop, step]
+        * for meas_type 3: single value for u_ds, list of u_gs[value_1, value_2, ...]
             * example: {'U_DS': 2.0, 'U_GS': [1.0, 2.0, 0.1]}
 
         * for meas_type 4: list of [start, step, stop] for both u_gs and u_ds is needed
-            * example: {'U_DS': [0, 3.3, 0.1], 'U_GS': [1, 3, 0.5]}
+            * example: {'U_DS': [value_1, value_2, ...], 'U_GS': [value_1, value_2, ...]}
     
     """
 
@@ -364,108 +364,136 @@ async def meas(topic_dict: dict, value_dict: dict, client):
         return_dict = {'U_DS': av_ds, 'U_GS': av_gs, 'I_D': av_Ib, 'break_bool': break_bool}
     
     elif meas_type == 'Drain-Source-Sweep':
+        if value_dict.get('multi') != None:
+            multi = value_dict['multi']
+        else:
+            multi = 1 # default value
         break_bool = False
         adc_ds_list = []
         adc_gs_list = []
         adc_Ib_list = []
-        ds_calculated_value = value_dict['U_DS'][0]
         dac_gs.write(int(value_dict['U_GS'] * U_1))
-        while ds_calculated_value < value_dict['U_DS'][1]:
-            dac_gs.write(int(value_dict['U_GS'] * U_1))
-            dac_ds.write(int(ds_calculated_value * U_1))
-            ds_calculated_value = ds_calculated_value + value_dict['U_DS'][2] # At this point, the step variable of the given list is added to the variable
+        for ds_value in value_dict['U_DS']:
+            dac_ds.write(int(ds_value * U_1))
             time.sleep(0.1) # Wait a little...
-            adc_ds_value = adc_ds.read_u16() * adcVDD / adcMax
-            adc_gs_value = adc_gs.read_u16() * adcVDD / adcMax
-            adc_Ib_value = adc_Ib.read_u16() * adcVDD / adcMax
-            Ib_current = (adc_Ib_value / multi_Ib) / 7.8
-            if Ib_current > 0.1:
-                break_bool = True
+            # init / reset sum variables
+            adc_ds_sum, adc_gs_sum, Ib_current_sum = 0, 0, 0
+            for _ in range(multi):
+                adc_ds_sum += adc_ds.read_u16() * adcVDD / adcMax
+                adc_gs_sum += adc_gs.read_u16() * adcVDD / adcMax
+                adc_opv_value = adc_Ib.read_u16() * adcVDD / adcMax
+                Ib_current_sum += (adc_opv_value / multi_Ib) / 7.8
+                if (adc_opv_value / multi_Ib) / 7.8 > 0.1: # checks if any Ib_current > 0.1 A
+                    break_bool = True
+                    break
+            # calculate average values
+            if break_bool:
                 break
+            ds_av_value = adc_ds_sum / multi
+            gs_av_value = adc_gs_sum / multi
+            Ib_av_value = Ib_current_sum / multi
             # Publish for every loop iteration
-            payload = json.dumps({'U_DS': adc_ds_value, 'U_GS': adc_gs_value, 'I_D': Ib_current}).encode('utf-8')
+            payload = json.dumps({'U_DS': ds_av_value, 'U_GS': gs_av_value, 'I_D': Ib_av_value}).encode('utf-8')
             await client.publish(topic, payload)
             logger.debug(f'Publish at {topic}, Payload: {payload}')
             # Now we want to add those variables to the created list variables above
-            adc_ds_list.append(adc_ds_value)
-            adc_gs_list.append(adc_gs_value)
-            adc_Ib_list.append(Ib_current)
+            adc_ds_list.append(ds_av_value)
+            adc_gs_list.append(gs_av_value)
+            adc_Ib_list.append(Ib_av_value)
         logger.debug(f'Bevore allocation: {gc.mem_free()/1000} kB')
         gc.collect()
         logger.debug(f'After allocation: {gc.mem_free()/1000} kB')
         return_dict = {'U_DS': adc_ds_list, 'U_GS': adc_gs_list, 'I_D': adc_Ib_list, 'break_bool': break_bool}
 
     elif topic_dict['meas_type'] == 'Gate-Source-Sweep':
+        if value_dict.get('multi') != None:
+            multi = value_dict['multi']
+        else:
+            multi = 1 # default value
         break_bool = False
         adc_ds_list = []
         adc_gs_list = []
         adc_Ib_list = []
-        gs_calculated_value = value_dict['U_GS'][0]
         dac_ds.write(int(value_dict['U_DS'] * U_1))
-        while gs_calculated_value < value_dict['U_GS'][1]:
-            dac_gs.write(int(gs_calculated_value * U_1))
-            gs_calculated_value = gs_calculated_value + value_dict['U_GS'][2] # At this point, the step variable of the given list is added to the variable
+        for gs_value in value_dict['U_GS']:
+            dac_gs.write(int(gs_value * U_1))
             time.sleep(0.1) # Wait a little...
-            adc_ds_value = adc_ds.read_u16() * adcVDD / adcMax
-            adc_gs_value = adc_gs.read_u16() * adcVDD / adcMax
-            adc_Ib_value = adc_Ib.read_u16() * adcVDD / adcMax
-            Ib_current = (adc_Ib_value / multi_Ib) / 7.8
-            if Ib_current > 0.1:
-                break_bool = True
+            # init / reset sum variables
+            adc_ds_sum, adc_gs_sum, Ib_current_sum = 0, 0, 0
+            for _ in range(multi):
+                adc_ds_sum += adc_ds.read_u16() * adcVDD / adcMax
+                adc_gs_sum += adc_gs.read_u16() * adcVDD / adcMax
+                adc_opv_value = adc_Ib.read_u16() * adcVDD / adcMax
+                Ib_current_sum += (adc_opv_value / multi_Ib) / 7.8
+                if (adc_opv_value / multi_Ib) / 7.8 > 0.1: # checks if any Ib_current > 0.1 A
+                    break_bool = True
+                    break
+            if break_bool:
                 break
+            # calculate average values
+            ds_av_value = adc_ds_sum / multi
+            gs_av_value = adc_gs_sum / multi
+            Ib_av_value = Ib_current_sum / multi
             # Publish for every loop iteration
-            payload = json.dumps({'U_DS': adc_ds_value, 'U_GS': adc_gs_value, 'I_D': Ib_current}).encode('utf-8')
+            payload = json.dumps({'U_DS': ds_av_value, 'U_GS': gs_av_value, 'I_D': Ib_av_value}).encode('utf-8')
             await client.publish(topic, payload)
             logger.debug(f'Publish at {topic}, Payload: {payload}')
             # Now we want to add those variables to the created list variables above
-            adc_ds_list.append(adc_ds_value)
-            adc_gs_list.append(adc_gs_value)
-            adc_Ib_list.append(Ib_current)
+            adc_ds_list.append(ds_av_value)
+            adc_gs_list.append(gs_av_value)
+            adc_Ib_list.append(Ib_av_value)
         logger.debug(f'Bevore allocation: {gc.mem_free()/1000} kB')
         gc.collect()
         logger.debug(f'After allocation: {gc.mem_free()/1000} kB')
         return_dict = {'U_DS': adc_ds_list, 'U_GS': adc_gs_list, 'I_D': adc_Ib_list, 'break_bool': break_bool}
     
     elif topic_dict['meas_type'] == 'Combined-Sweep':
+        if value_dict.get('multi') != None:
+            multi = value_dict['multi']
+        else:
+            multi = 1 # default value
         break_bool = False
         return_dict = {}
         main_ds_list = []
         main_gs_list = []
         main_Ib_list = []
-        ds_calculated_value = value_dict['U_DS'][0]
-        gs_calculated_value = value_dict['U_GS'][0]
-        while gs_calculated_value < value_dict['U_GS'][1]:
-            # we need to make sure that all our used list in those loops are ready for new data
+        for gs_value in value_dict['U_GS']:
+            # we need to make sure that all of our used list in those loops are ready for new data
             adc_ds_list = []
             adc_gs_list = []
             adc_Ib_list = []
-            dac_gs.write(int(gs_calculated_value * U_1))
-            while ds_calculated_value < value_dict['U_DS'][1]:
-                dac_ds.write(int(ds_calculated_value * U_1))
-                ds_calculated_value = ds_calculated_value + value_dict['U_DS'][2] # At this point, the step variable of the given list is added to the variable
+            dac_gs.write(int(gs_value * U_1))
+            for ds_value in value_dict['U_DS']:
+                dac_ds.write(int(ds_value * U_1))
                 time.sleep(0.1) # Wait a little...
-                adc_ds_value = adc_ds.read_u16() * adcVDD / adcMax
-                adc_gs_value = adc_gs.read_u16() * adcVDD / adcMax
-                adc_Ib_value = adc_Ib.read_u16() * adcVDD / adcMax
-                Ib_current = (adc_Ib_value / multi_Ib) / 7.8
-                if Ib_current > 0.1:
-                    break_bool = True
+                # init / reset sum variables
+                adc_ds_sum, adc_gs_sum, Ib_current_sum = 0, 0, 0
+                for _ in range(multi):
+                    adc_ds_sum += adc_ds.read_u16() * adcVDD / adcMax
+                    adc_gs_sum += adc_gs.read_u16() * adcVDD / adcMax
+                    adc_opv_value = adc_Ib.read_u16() * adcVDD / adcMax
+                    Ib_current_sum += (adc_opv_value / multi_Ib) / 7.8
+                    if (adc_opv_value / multi_Ib) / 7.8 > 0.1: # checks if any Ib_current > 0.1 A
+                        break_bool = True
+                        break
+                if break_bool:
                     break
+                # calculate average values
+                ds_av_value = adc_ds_sum / multi
+                gs_av_value = adc_gs_sum / multi
+                Ib_av_value = Ib_current_sum / multi
                 # Publish for every loop iteration
-                payload = json.dumps({'U_DS': adc_ds_value, 'U_GS': adc_gs_value, 'I_D': Ib_current}).encode('utf-8')
+                payload = json.dumps({'U_DS': ds_av_value, 'U_GS': gs_av_value, 'I_D': Ib_av_value, 'U_GS_selected': gs_value}).encode('utf-8')
                 await client.publish(topic, payload)
                 logger.debug(f'Publish at {topic}, Payload: {payload}')
                 # Now we want to add those variables to the created list variables above
-                adc_ds_list.append(adc_ds_value)
-                adc_gs_list.append(adc_gs_value)
-                adc_Ib_list.append(Ib_current)
+                adc_ds_list.append(ds_av_value)
+                adc_gs_list.append(gs_av_value)
+                adc_Ib_list.append(Ib_av_value)
             # we need to save those measured values before the loop starts again
             main_ds_list.append(adc_ds_list)
             main_gs_list.append(adc_gs_list)
             main_Ib_list.append(adc_Ib_list)
-            # update and reset those values to ensure measurement-sweep
-            gs_calculated_value = gs_calculated_value + value_dict['U_GS'][2]
-            ds_calculated_value = value_dict['U_DS'][0]
             logger.debug(f'Bevore allocation: {gc.mem_free()/1000} kB')
             gc.collect()
             logger.debug(f'After allocation: {gc.mem_free()/1000} kB')
@@ -561,7 +589,11 @@ async def main_callback(topic, msg, retained, qos, dup):
         payload = f'An Error occured: {e}'.encode('utf-8')
         await client.publish(debug_topic, payload)
         logger.debug(f'Publish at {debug_topic}, Payload: {payload}')
-        logger.error('file update error')
+
+        payload = 'ready'.encode('utf-8')
+        await client.publish(condition_topic, payload)
+        logger.debug(f'Publish at {condition_topic}, Payload: {payload}')
+        logger.error(f'Error detected: {e}')
 
     gc.collect()
 
@@ -582,13 +614,14 @@ async def main():
     global config
     main_config = glob['main_config']
     # for now: if last-will is defined: rpi pico will lose its connection to the broker: dead socket - needs to be fixed for the purpose below
-    # mqtt_async.config['will'] = mqtt_async.MQTTMessage(f'{glob["topic_prefix"]}/Zustand_Messplatz/{glob["board_id"]}', 'offline')
+    main_config['will'] = mqtt_async.MQTTMessage(f'{glob["topic_prefix"]}/Zustand_Messplatz/{glob["board_id"]}', 'offline')
     main_config['server'] = config['mqtt_server']
     main_config['port'] = config['mqtt_port']
     main_config['client_id'] = glob['mac_addr']
     main_config['interface'] = network.WLAN(network.STA_IF)
     main_config['clean'] = False
-    main_config['keepalive'] = 30
+    main_config['keepalive'] = 100
+    main_config['response_time'] = 30
     main_config['subs_cb'] = main_callback
     main_config['connect_coro'] = main_conn_callback
     main_config['wifi_coro'] = wifi_conn
@@ -609,6 +642,7 @@ async def main():
     payload = 'ready'.encode('utf-8')
     await main_client.publish(condition_topic, payload)
     logger.debug(f'Publish at {condition_topic}, Payload: {payload}')
+    logger.debug(f'Free RAM: {gc.mem_free()/1000} kB')
 
     #connTask = asyncio.create_task(check_connection())
     blink_task = asyncio.create_task(blink(glob['led_board'], glob['board_id'], glob['btn_3']))
@@ -651,11 +685,5 @@ async def updater(file_name, folder=None):
         with open(file_name, 'w') as file:
             file.write(r.text)
         time.sleep(1)
-
-# async def keep_alive_man(client):
-#     global glob
-#     while True:
-#         await client.publish(glob['topic_prefix'] + f'/keepalive/{glob["board_id"]}', 'keepalive'.encode('utf-8'))
-#         await asyncio.sleep(20)
 
 asyncio.get_event_loop().run_until_complete(main())
