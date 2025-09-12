@@ -7,6 +7,7 @@ import mqtt_async
 import asyncio
 import network
 import urequests
+import array
 import random
 import mywlan
 import json
@@ -50,6 +51,10 @@ glob = {
     'board_id': False,
     'mac_addr': None, 
     'wlan': None,
+    # for measurement: arrays
+    'gs_array': array.array('f', [0.0] * 5000),
+    'ds_array': array.array('f', [0.0] * 5000),
+    'ib_array': array.array('f', [0.0] * 5000),
     }
 # ------------------------------------
 #  MQTT: Start of registration process
@@ -296,6 +301,28 @@ async def blink(led, board_id, btn_3):
                 await asyncio.sleep(0.2)     
         await asyncio.sleep(2)
 
+async def reserve_buffer(size, buffer):
+    start = 0
+    end = start + size
+    if end > len(buffer):
+        raise MemoryError("Kein freier Speicher mehr im globalen Puffer")
+    return start, end
+
+async def reshape_buffer(buffer_slice: array.array):
+    start_idx = 0
+    reshaped = []
+    for idx, value in enumerate(buffer_slice):
+            if value == 0.0: # no value found
+                pass
+            elif value == 5.0: # stop value found (will be written if break_bool = True)
+                if idx > start_idx:
+                    reshaped.append(buffer_slice[start_idx:idx])
+                start_idx = idx+1
+            elif value == 10.0: # initial ending value
+                break
+    return reshaped
+
+
 async def meas(topic_dict: dict, value_dict: dict, client):
     """
     ### Main measurement funciton. Description tba
@@ -333,45 +360,36 @@ async def meas(topic_dict: dict, value_dict: dict, client):
     adcMax = 2**16 # 16 Bit
     adcVDD = 3.3   # Volt
     U_1 = 4095/adcVDD # reference-value for dac's: is used to iterate over 4095 states for Voltages fom 0 to 3.3 V
+    
     topic = f"{glob['topic_prefix']}/Einzeln/{username}/{time_stamp}/{board_id}/{meas_type}"
+    break_bool = False
 
     if meas_type == 'Single-Measurement':
-        if value_dict.get('multi') != None:
-            multi = value_dict['multi']
-        else:
-            multi = 1 # default value
+        multi = value_dict.get('multi', 1)
         break_bool = False
-        multi_lst_ds = []
-        multi_lst_gs = []
-        multi_lst_Ib = []
+        dac_gs.write(int(value_dict['U_GS'] * U_1))
+        dac_ds.write(int(value_dict['U_DS'] * U_1))
+        adc_ds_sum, adc_gs_sum, Ib_current_sum = 0, 0, 0
         for _ in range(multi):
-            dac_gs.write(int(value_dict['U_GS'] * U_1))
-            dac_ds.write(int(value_dict['U_DS'] * U_1))
-            time.sleep(0.1) # do not use asyncio on purpose here to sustain that measurement
-            adc_ds_value = adc_ds.read_u16() * adcVDD / adcMax
-            adc_gs_value = adc_gs.read_u16() * adcVDD / adcMax
-            adc_Ib_value = adc_Ib.read_u16() * adcVDD / adcMax
-            Ib_current = (adc_Ib_value / multi_Ib) / 7.8
-            if Ib_current > 0.1:
+            adc_ds_sum += adc_ds.read_u16() * adcVDD / adcMax
+            adc_gs_sum += adc_gs.read_u16() * adcVDD / adcMax
+            adc_opv_value = adc_Ib.read_u16() * adcVDD / adcMax
+            Ib_current_sum += (adc_opv_value / multi_Ib) / 7.8
+            if (adc_opv_value / multi_Ib) / 7.8 > 0.1: # checks if any Ib_current > 0.1 A
                 break_bool = True
-            multi_lst_ds.append(adc_ds_value)
-            multi_lst_gs.append(adc_gs_value)
-            multi_lst_Ib.append(Ib_current)
-        av_ds = sum(multi_lst_ds) / len(multi_lst_ds)
-        av_gs = sum(multi_lst_gs) / len(multi_lst_gs)
-        av_Ib = sum(multi_lst_Ib) / len(multi_lst_Ib)
+                return {'U_DS': '', 'U_GS': '', 'I_D': '', 'break_bool': break_bool}
+            # calculate average values
+        ds_av_value = adc_ds_sum / multi
+        gs_av_value = adc_gs_sum / multi
+        Ib_av_value = Ib_current_sum / multi
+        return_dict = {'U_DS': ds_av_value, 'U_GS': gs_av_value, 'I_D': Ib_av_value, 'break_bool': break_bool}
         gc.collect()
-        return_dict = {'U_DS': av_ds, 'U_GS': av_gs, 'I_D': av_Ib, 'break_bool': break_bool}
     
     elif meas_type == 'Drain-Source-Sweep':
-        if value_dict.get('multi') != None:
-            multi = value_dict['multi']
-        else:
-            multi = 1 # default value
-        break_bool = False
-        adc_ds_list = []
-        adc_gs_list = []
-        adc_Ib_list = []
+        multi = value_dict.get('multi', 1)
+        needed_size = len(value_dict['U_GS'])
+        start, end = await reserve_buffer(needed_size, glob['ds_array']) # any buffer to check if there is enough space for all values
+        idx = start # = 0
         dac_gs.write(int(value_dict['U_GS'] * U_1))
         for ds_value in value_dict['U_DS']:
             dac_ds.write(int(ds_value * U_1))
@@ -389,31 +407,33 @@ async def meas(topic_dict: dict, value_dict: dict, client):
             # calculate average values
             if break_bool:
                 break
+            # calculate average values
             ds_av_value = adc_ds_sum / multi
             gs_av_value = adc_gs_sum / multi
             Ib_av_value = Ib_current_sum / multi
+            # save those variables to the corresponding arrays
+            glob['ds_array'][idx] = ds_av_value
+            glob['gs_array'][idx] = gs_av_value
+            glob['ib_array'][idx] = Ib_av_value
+            idx += 1
             # Publish for every loop iteration
             payload = json.dumps({'U_DS': ds_av_value, 'U_GS': gs_av_value, 'I_D': Ib_av_value}).encode('utf-8')
             await client.publish(topic, payload)
             logger.debug(f'Publish at {topic}, Payload: {payload}')
-            # Now we want to add those variables to the created list variables above
-            adc_ds_list.append(ds_av_value)
-            adc_gs_list.append(gs_av_value)
-            adc_Ib_list.append(Ib_av_value)
+
+        main_ds_list = list(glob['ds_array'][start:idx])
+        main_gs_list = list(glob['gs_array'][start:idx])
+        main_ib_list = list(glob['ib_array'][start:idx])
+        return_dict = {'U_DS': main_ds_list, 'U_GS': main_gs_list, 'I_D': main_ib_list, 'break_bool': break_bool}
         logger.debug(f'Bevore allocation: {gc.mem_free()/1000} kB')
         gc.collect()
         logger.debug(f'After allocation: {gc.mem_free()/1000} kB')
-        return_dict = {'U_DS': adc_ds_list, 'U_GS': adc_gs_list, 'I_D': adc_Ib_list, 'break_bool': break_bool}
 
     elif topic_dict['meas_type'] == 'Gate-Source-Sweep':
-        if value_dict.get('multi') != None:
-            multi = value_dict['multi']
-        else:
-            multi = 1 # default value
-        break_bool = False
-        adc_ds_list = []
-        adc_gs_list = []
-        adc_Ib_list = []
+        multi = value_dict.get('multi', 1)
+        needed_size = len(value_dict['U_GS'])
+        start, end = await reserve_buffer(needed_size, glob['ds_array']) # any buffer to check if there is enough space for all values
+        idx = start # = 0
         dac_ds.write(int(value_dict['U_DS'] * U_1))
         for gs_value in value_dict['U_GS']:
             dac_gs.write(int(gs_value * U_1))
@@ -429,39 +449,40 @@ async def meas(topic_dict: dict, value_dict: dict, client):
                     break_bool = True
                     break
             if break_bool:
-                break
+                    break
             # calculate average values
             ds_av_value = adc_ds_sum / multi
             gs_av_value = adc_gs_sum / multi
             Ib_av_value = Ib_current_sum / multi
+            # save those variables to the corresponding arrays
+            glob['ds_array'][idx] = ds_av_value
+            glob['gs_array'][idx] = gs_av_value
+            glob['ib_array'][idx] = Ib_av_value
+            idx += 1
             # Publish for every loop iteration
             payload = json.dumps({'U_DS': ds_av_value, 'U_GS': gs_av_value, 'I_D': Ib_av_value}).encode('utf-8')
             await client.publish(topic, payload)
             logger.debug(f'Publish at {topic}, Payload: {payload}')
-            # Now we want to add those variables to the created list variables above
-            adc_ds_list.append(ds_av_value)
-            adc_gs_list.append(gs_av_value)
-            adc_Ib_list.append(Ib_av_value)
+
+        main_ds_list = list(glob['ds_array'][start:idx])
+        main_gs_list = list(glob['gs_array'][start:idx])
+        main_ib_list = list(glob['ib_array'][start:idx])
+        return_dict = {'U_DS': main_ds_list, 'U_GS': main_gs_list, 'I_D': main_ib_list, 'break_bool': break_bool}
         logger.debug(f'Bevore allocation: {gc.mem_free()/1000} kB')
         gc.collect()
         logger.debug(f'After allocation: {gc.mem_free()/1000} kB')
-        return_dict = {'U_DS': adc_ds_list, 'U_GS': adc_gs_list, 'I_D': adc_Ib_list, 'break_bool': break_bool}
     
     elif topic_dict['meas_type'] == 'Combined-Sweep':
-        if value_dict.get('multi') != None:
-            multi = value_dict['multi']
-        else:
-            multi = 1 # default value
-        break_bool = False
-        return_dict = {}
-        main_ds_list = []
-        main_gs_list = []
-        main_Ib_list = []
+        multi = value_dict.get('multi', 1)
+        outer_len = len(value_dict['U_GS'])
+        inner_len = len(value_dict['U_DS'])
+        needed_size = outer_len * inner_len
+        start, end = await reserve_buffer(needed_size, glob['ds_array']) # any buffer to check if there is enough space for all values
+        idx = start # = 0
+        # for gs_value in value_dict['U_GS']:
         for gs_value in value_dict['U_GS']:
+            break_flag = False
             # we need to make sure that all of our used list in those loops are ready for new data
-            adc_ds_list = []
-            adc_gs_list = []
-            adc_Ib_list = []
             dac_gs.write(int(gs_value * U_1))
             for ds_value in value_dict['U_DS']:
                 dac_ds.write(int(ds_value * U_1))
@@ -475,29 +496,42 @@ async def meas(topic_dict: dict, value_dict: dict, client):
                     Ib_current_sum += (adc_opv_value / multi_Ib) / 7.8
                     if (adc_opv_value / multi_Ib) / 7.8 > 0.1: # checks if any Ib_current > 0.1 A
                         break_bool = True
+                        break_flag = True
                         break
-                if break_bool:
+                if break_flag:
+                    glob['ds_array'][idx] = 5.0
+                    glob['gs_array'][idx] = 5.0
+                    glob['ib_array'][idx] = 5.0
+                    idx += 1
                     break
                 # calculate average values
                 ds_av_value = adc_ds_sum / multi
                 gs_av_value = adc_gs_sum / multi
                 Ib_av_value = Ib_current_sum / multi
+                # save those variables to the corresponding arrays
+                glob['ds_array'][idx] = ds_av_value
+                glob['gs_array'][idx] = gs_av_value
+                glob['ib_array'][idx] = Ib_av_value
+                idx += 1
                 # Publish for every loop iteration
                 payload = json.dumps({'U_DS': ds_av_value, 'U_GS': gs_av_value, 'I_D': Ib_av_value, 'U_GS_selected': gs_value}).encode('utf-8')
                 await client.publish(topic, payload)
                 logger.debug(f'Publish at {topic}, Payload: {payload}')
-                # Now we want to add those variables to the created list variables above
-                adc_ds_list.append(ds_av_value)
-                adc_gs_list.append(gs_av_value)
-                adc_Ib_list.append(Ib_av_value)
-            # we need to save those measured values before the loop starts again
-            main_ds_list.append(adc_ds_list)
-            main_gs_list.append(adc_gs_list)
-            main_Ib_list.append(adc_Ib_list)
+            # we need to mark the end of a loop iteration
+            glob['ds_array'][idx] = 5.0
+            glob['gs_array'][idx] = 5.0
+            glob['ib_array'][idx] = 5.0
+            idx += 1
             logger.debug(f'Bevore allocation: {gc.mem_free()/1000} kB')
             gc.collect()
             logger.debug(f'After allocation: {gc.mem_free()/1000} kB')
-        return_dict = {'U_DS': main_ds_list, 'U_GS': main_gs_list, 'I_D': main_Ib_list, 'break_bool': break_bool}
+        glob['ds_array'][idx] = 10.0
+        glob['gs_array'][idx] = 10.0
+        glob['ib_array'][idx] = 10.0
+        main_ds_list = await reshape_buffer(glob['ds_array'][start:idx])
+        main_gs_list = await reshape_buffer(glob['gs_array'][start:idx])
+        main_ib_list = await reshape_buffer(glob['ib_array'][start:idx])
+        return_dict = {'U_DS': main_ds_list, 'U_GS': main_gs_list, 'I_D': main_ib_list, 'break_bool': break_bool}
     else:
         return 'unknown measurement type'
     # sustain output low if the measurement is done
