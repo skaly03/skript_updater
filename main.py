@@ -387,7 +387,7 @@ async def meas(topic_dict: dict, value_dict: dict, client):
     
     elif meas_type == 'Drain-Source-Sweep':
         multi = value_dict.get('multi', 1)
-        needed_size = len(value_dict['U_GS'])
+        needed_size = len(value_dict['U_DS'])
         start, end = await reserve_buffer(needed_size, glob['ds_array']) # any buffer to check if there is enough space for all values
         idx = start # = 0
         dac_gs.write(int(value_dict['U_GS'] * U_1))
